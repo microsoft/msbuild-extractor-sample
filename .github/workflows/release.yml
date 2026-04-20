@@ -1,0 +1,88 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (without leading v), e.g. 1.2.3'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+      CONFIGURATION: Release
+      RUNTIME: win-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF -replace '^refs/tags/v',''
+          } else {
+            $v = '${{ inputs.version }}'
+          }
+          if ([string]::IsNullOrWhiteSpace($v)) { throw "Version not resolved" }
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Releasing version: $v"
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore msbuild-extractor-sample.csproj
+
+      - name: Build
+        run: dotnet build msbuild-extractor-sample.csproj --configuration $env:CONFIGURATION --no-restore /p:Version=$env:VERSION
+
+      - name: Publish self-contained single-file (${{ env.RUNTIME }})
+        run: >
+          dotnet publish msbuild-extractor-sample.csproj
+          --configuration $env:CONFIGURATION
+          --runtime $env:RUNTIME
+          --self-contained true
+          --output publish\$env:RUNTIME
+          /p:Version=$env:VERSION
+          /p:PublishSingleFile=true
+          /p:IncludeNativeLibrariesForSelfExtract=true
+          /p:DebugType=embedded
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $zip = "msbuild-extractor-sample-v$env:VERSION-$env:RUNTIME.zip"
+          Compress-Archive -Path "publish\$env:RUNTIME\*" -DestinationPath $zip -Force
+          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          body: |
+            Automated release built from `${{ github.sha }}`.
+
+            Artifact: self-contained single-file executable for `${{ env.RUNTIME }}` (no .NET runtime required on target machine).
+          files: |
+            ${{ env.ZIP_PATH }}
+            publish/${{ env.RUNTIME }}/msbuild-extractor-sample.exe
+          fail_on_unmatched_files: true
