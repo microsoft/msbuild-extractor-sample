@@ -1,66 +1,66 @@
 # MSBuild Compile Commands Extractor
 
-Extract [`compile_commands.json`](https://clang.llvm.org/docs/JSONCompilationDatabase.html) from Visual C++ MSBuild projects - the same compilation database used by [clangd](https://clangd.llvm.org/), [clang-tidy](https://clang.llvm.org/extra/clang-tidy/), and VS Code C++ extensions for IntelliSense, code navigation, and static analysis.
+This repo contains a sample that demonstrates how to extract [`compile_commands.json`](https://clang.llvm.org/docs/JSONCompilationDatabase.html) from Visual C++ MSBuild projects (.vcxproj, .sln, .slnx) using the MSBuild API.
 
-Works with `.vcxproj`, `.sln`, `.slnx`, and CMake-generated Visual Studio solutions.
+The generated compilation database can be used with VS Code and C++ LSP tools for IntelliSense, code navigation, and static analysis.
 
 ## Examples
 
 ### Basic extraction
 
 ```bash
-msbuild-extractor --project myapp.vcxproj -c Debug -a x64
+msbuild-extractor-sample --project myapp.vcxproj -c Debug -a x64
 ```
 
 ### Solution with multiple projects
 
 ```bash
-msbuild-extractor --solution myapp.sln -c Debug -a x64 -o compile_commands.json
+msbuild-extractor-sample --solution myapp.sln -c Debug -a x64 -o compile_commands.json
 ```
 
 ### Auto-detect Visual Studio (no manual paths needed)
 
 ```bash
 # List installed VS instances
-msbuild-extractor --list-instances
+msbuild-extractor-sample --list-instances
 
 # Use a specific VS instance
-msbuild-extractor --vs-instance cdf4 --solution myapp.sln -c Debug -a x64
+msbuild-extractor-sample --vs-instance cdf4 --solution myapp.sln -c Debug -a x64
 ```
 
 ### Validate extracted commands (compile every file with cl.exe)
 
 ```bash
-msbuild-extractor --solution myapp.sln -c Debug -a x64 --validate
+msbuild-extractor-sample --solution myapp.sln -c Debug -a x64 --validate
 ```
 
 ### Multi-configuration extraction
 
 ```bash
 # Extract all configurations (Debug/Release × x64/Win32/ARM64)
-msbuild-extractor --project myapp.vcxproj --all-configurations
+msbuild-extractor-sample --project myapp.vcxproj --all-configurations
 
 # Merge into single file with one entry per source file
-msbuild-extractor --project myapp.vcxproj --all-configurations --merge --deduplicate
+msbuild-extractor-sample --project myapp.vcxproj --all-configurations --merge --deduplicate
 ```
 
 ### Merge multiple solutions
 
 ```bash
-msbuild-extractor --solution engine.sln --solution editor.sln -c Debug -a x64 -o compile_commands.json
+msbuild-extractor-sample --solution engine.sln --solution editor.sln -c Debug -a x64 -o compile_commands.json
 ```
 
 ### Rich hierarchical format
 
 ```bash
 # Structured output with solutions/projects/configurations/files
-msbuild-extractor --solution myapp.sln --format rich -o compile_database.json
+msbuild-extractor-sample --solution myapp.sln --format rich -o compile_database.json
 ```
 
 ### Out-of-process mode (custom MSBuild)
 
 ```bash
-msbuild-extractor --solution myapp.sln --msbuild-path "C:\VS\MSBuild\Current\Bin\MSBuild.exe" -c Debug -a x64
+msbuild-extractor-sample --solution myapp.sln --msbuild-path "C:\VS\MSBuild\Current\Bin\MSBuild.exe" -c Debug -a x64
 ```
 
 ## Features
@@ -74,7 +74,7 @@ msbuild-extractor --solution myapp.sln --msbuild-path "C:\VS\MSBuild\Current\Bin
 - **Rich format** - `--format rich` outputs a hierarchical JSON schema with solutions, projects, configurations, structured includes/defines, and toolchain metadata
 - **GN project support** - extracts IntelliSense settings from GN-generated VS solutions (Chromium, Crashpad, WebRTC) via `ItemDefinitionGroup` fallback
 - **VS instance selection** - `--list-instances` shows all VS installations; `--vs-instance <id>` selects by instance ID
-- **clangd compatible** - clean JSON output (no extra keys), real `cl.exe` path, `-ferror-limit=0` and `--target` injection for optimal clangd experience
+- **LSP compatible** - clean JSON output (no extra keys), real `cl.exe` path, `-ferror-limit=0` and `--target` injection for optimal C++ LSP experience
 - **Solution formats** - `.sln`, `.slnx`, and GN-generated `.sln` files
 
 ## Installation
@@ -87,8 +87,8 @@ msbuild-extractor --solution myapp.sln --msbuild-path "C:\VS\MSBuild\Current\Bin
 ### Build from source
 
 ```bash
-git clone https://github.com/<owner>/msbuild-extractor.git
-cd msbuild-extractor
+git clone https://github.com/<owner>/msbuild-extractor-sample.git
+cd msbuild-extractor-sample
 dotnet build
 ```
 
@@ -101,7 +101,7 @@ dotnet run -- --solution path/to/solution.sln -c Debug -a x64
 ## Usage
 
 ```
-msbuild-extractor [options]
+msbuild-extractor-sample [options]
 
 Options:
   -p, --project <path>              Path to .vcxproj file (repeatable)
@@ -124,10 +124,13 @@ Options:
   --vc-tools-install-dir <path>     VCToolsInstallDir property (auto-detected)
   --msbuild-path <path>             MSBuild.exe path (enables out-of-process mode)
   --use-dev-env                     Read Developer Command Prompt environment variables
+  --c-cpp-properties                Emit .vscode/c_cpp_properties.json alongside the output
   --logger                          Enable MSBuild console logger output
 ```
 
 At least one `--project` or `--solution` must be specified. Both can be repeated and combined.
+
+The output includes a sentinel entry (`.msbuild-extractor-sample`) as the first element so consumers can identify the generator. Standard C++ LSP tools silently skip it since the file does not exist on disk.
 
 ## How It Works
 
@@ -153,3 +156,4 @@ dotnet build
 ## License
 
 MIT
+

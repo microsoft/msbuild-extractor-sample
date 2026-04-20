@@ -17,9 +17,17 @@ namespace MSBuild.CompileCommands.Extractor
             int Version,
             string Generator,
             string GeneratedAt,
+            FingerprintInfo Fingerprint,
             ToolchainInfo? Toolchain,
             List<SolutionEntry> Solutions,
             List<ProjectEntry> StandaloneProjects
+        );
+
+        public record FingerprintInfo(
+            string Tool,
+            string ToolVersion,
+            int SchemaVersion,
+            string Checksum
         );
 
         public record ToolchainInfo(
@@ -96,10 +104,13 @@ namespace MSBuild.CompileCommands.Extractor
 
             var standaloneProjects = BuildProjectEntries(standaloneCommands);
 
+            var fingerprint = BuildFingerprint(commands);
+
             return new Root(
                 Version: SchemaVersion,
-                Generator: "msbuild-extractor",
+                Generator: "msbuild-extractor-sample",
                 GeneratedAt: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                Fingerprint: fingerprint,
                 Toolchain: toolchain,
                 Solutions: solutions,
                 StandaloneProjects: standaloneProjects
@@ -308,6 +319,103 @@ namespace MSBuild.CompileCommands.Extractor
             catch { return path; }
         }
 
+        private static FingerprintInfo BuildFingerprint(List<CompileCommand> commands)
+        {
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            using var stream = new MemoryStream();
+            using var writer = new StreamWriter(stream);
+
+            foreach (var cmd in commands.OrderBy(c => c.File, StringComparer.OrdinalIgnoreCase))
+            {
+                writer.Write(cmd.File);
+                writer.Write('\0');
+                foreach (var arg in cmd.Arguments)
+                {
+                    writer.Write(arg);
+                    writer.Write('\0');
+                }
+                writer.Write('\n');
+            }
+            writer.Flush();
+            stream.Position = 0;
+
+            var hash = sha.ComputeHash(stream);
+            var checksum = "sha256:" + Convert.ToHexStringLower(hash);
+
+            return new FingerprintInfo(
+                Tool: "msbuild-extractor-sample",
+                ToolVersion: "1.0.0",
+                SchemaVersion: SchemaVersion,
+                Checksum: checksum
+            );
+        }
+
+        /// <summary>
+        /// Generate a .vscode/c_cpp_properties.json that references the compile_commands.json.
+        /// </summary>
+        public static void GenerateCCppProperties(string compileCommandsPath, string platform, string baseDir)
+        {
+            var vsCodeDir = Path.Combine(baseDir, ".vscode");
+            Directory.CreateDirectory(vsCodeDir);
+
+            var propsPath = Path.Combine(vsCodeDir, "c_cpp_properties.json");
+
+            if (File.Exists(propsPath))
+            {
+                Console.WriteLine($"Warning: {propsPath} already exists, overwriting");
+            }
+
+            // Make compileCommands path relative using ${workspaceFolder} if possible
+            string compileCommandsRef;
+            var fullCcPath = Path.GetFullPath(compileCommandsPath);
+            var fullBaseDir = Path.GetFullPath(baseDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (fullCcPath.StartsWith(fullBaseDir, StringComparison.OrdinalIgnoreCase))
+                compileCommandsRef = "${workspaceFolder}/" + fullCcPath[fullBaseDir.Length..].Replace('\\', '/');
+            else
+                compileCommandsRef = fullCcPath.Replace('\\', '/');
+
+            var intelliSenseMode = platform.ToLowerInvariant() switch
+            {
+                "x64" => "msvc-x64",
+                "win32" or "x86" => "msvc-x86",
+                "arm64" or "arm64ec" => "msvc-arm64",
+                "arm" => "msvc-arm",
+                _ => "msvc-x64"
+            };
+
+            var configName = platform.ToLowerInvariant() switch
+            {
+                "x64" => "MSVC x64",
+                "win32" or "x86" => "MSVC x86",
+                "arm64" => "MSVC ARM64",
+                "arm" => "MSVC ARM",
+                _ => "MSVC"
+            };
+
+            var config = new
+            {
+                configurations = new[]
+                {
+                    new
+                    {
+                        name = configName,
+                        compileCommands = compileCommandsRef,
+                        intelliSenseMode = intelliSenseMode
+                    }
+                },
+                version = 4
+            };
+
+            var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            });
+
+            File.WriteAllText(propsPath, json);
+            Console.WriteLine($"Wrote {propsPath}");
+        }
+
         /// <summary>
         /// Serialize a Root to JSON string.
         /// </summary>
@@ -324,3 +432,4 @@ namespace MSBuild.CompileCommands.Extractor
         };
     }
 }
+

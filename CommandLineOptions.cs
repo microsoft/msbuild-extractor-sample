@@ -31,6 +31,7 @@ namespace MSBuild.CompileCommands.Extractor
         public string PreferPlatform { get; set; } = "x64";
         public bool ListInstances { get; set; }
         public string? VsInstance { get; set; }
+        public bool EmitCCppProperties { get; set; }
 
         public static CommandLineOptions Parse(string[] args)
         {
@@ -166,6 +167,12 @@ namespace MSBuild.CompileCommands.Extractor
                 Description = "Select VS installation by instance ID (use --list-instances to see available)"
             };
 
+            var cCppPropertiesOption = new Option<bool>("--c-cpp-properties")
+            {
+                Description = "Emit a .vscode/c_cpp_properties.json pointing to the generated compile_commands.json",
+                DefaultValueFactory = _ => false
+            };
+
             var rootCommand = new RootCommand("Extract compile_commands.json from Visual C++ MSBuild projects");
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(solutionOption);
@@ -190,6 +197,7 @@ namespace MSBuild.CompileCommands.Extractor
             rootCommand.Options.Add(preferPlatformOption);
             rootCommand.Options.Add(listInstancesOption);
             rootCommand.Options.Add(vsInstanceOption);
+            rootCommand.Options.Add(cCppPropertiesOption);
 
             rootCommand.Validators.Add(commandResult =>
             {
@@ -202,6 +210,9 @@ namespace MSBuild.CompileCommands.Extractor
 
                 if (projects.Length == 0 && solutions.Length == 0)
                     commandResult.AddError("At least one --project or --solution must be specified.");
+
+                if (commandResult.GetValue(cCppPropertiesOption) && commandResult.GetValue(formatOption) == "rich")
+                    commandResult.AddError("--c-cpp-properties cannot be used with --format rich (rich format does not produce compile_commands.json).");
             });
 
             rootCommand.SetAction(parseResult =>
@@ -230,7 +241,8 @@ namespace MSBuild.CompileCommands.Extractor
                     PreferConfiguration = parseResult.GetValue(preferConfigOption)!,
                     PreferPlatform = parseResult.GetValue(preferPlatformOption)!,
                     ListInstances = parseResult.GetValue(listInstancesOption),
-                    VsInstance = parseResult.GetValue(vsInstanceOption)
+                    VsInstance = parseResult.GetValue(vsInstanceOption),
+                    EmitCCppProperties = parseResult.GetValue(cCppPropertiesOption)
                 };
             });
 

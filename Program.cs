@@ -116,9 +116,7 @@ namespace MSBuild.CompileCommands.Extractor
                 return;
             }
 
-            // Run extraction
-            // Rich format always needs in-memory commands for hierarchical grouping
-            bool needInMemory = options.Validate || options.Format == "rich";
+            // Run extraction (always in-memory so we can prepend the sentinel entry)
             List<CompileCommand>? commands = null;
             if (isMultiInput)
             {
@@ -126,17 +124,11 @@ namespace MSBuild.CompileCommands.Extractor
             }
             else if (isOutOfProcess)
             {
-                if (needInMemory)
-                    commands = ExtractOutOfProcess(options);
-                else
-                    RunExtractOutOfProcess(options);
+                commands = ExtractOutOfProcess(options);
             }
             else
             {
-                if (needInMemory)
-                    commands = ExtractInProcess(options);
-                else
-                    RunExtractInProcess(options);
+                commands = ExtractInProcess(options);
             }
 
             // Write output when we collected commands in-memory
@@ -152,6 +144,11 @@ namespace MSBuild.CompileCommands.Extractor
                 var outputPath = options.Output ?? GetDefaultOutputPath(options);
                 WriteJson(commands, outputPath, options: options);
                 Console.WriteLine($"Wrote {commands.Count} entries to {outputPath}");
+                if (options.EmitCCppProperties)
+                {
+                    var baseDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
+                    RichDatabase.GenerateCCppProperties(outputPath, options.Platform, baseDir);
+                }
                 if (options.Validate)
                     RunValidation(commands);
             }
@@ -272,6 +269,11 @@ namespace MSBuild.CompileCommands.Extractor
                 var outputPath = options.Output ?? Path.Combine(GetOutputDirectory(options), "compile_commands.json");
                 WriteJson(allCommands, outputPath, includeMetadata: !options.Deduplicate, options: options);
                 Console.WriteLine($"Wrote {allCommands.Count} entries{(options.Deduplicate ? " (deduplicated)" : " (merged)")} to {outputPath}");
+                if (options.EmitCCppProperties)
+                {
+                    var baseDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
+                    RichDatabase.GenerateCCppProperties(outputPath, options.Platform, baseDir);
+                }
             }
         }
 
@@ -406,11 +408,27 @@ namespace MSBuild.CompileCommands.Extractor
                 return;
             }
 
+            // Prepend a sentinel entry so consumers can identify this file as generated
+            // by msbuild-extractor-sample. Tools like clangd silently skip entries whose
+            // file does not exist on disk, so this is invisible to all standard consumers.
+            var outputDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
+            var sentinel = new
+            {
+                file = ".msbuild-extractor-sample",
+                directory = outputDir,
+                command = "generated-by:msbuild-extractor-sample/1.0.0"
+            };
+
             string json;
+            var jsonOptions = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            };
+
             if (includeMetadata)
             {
-                // Serialize with metadata (for --merge where config/platform disambiguation matters)
-                var entries = commands.Select(c => new
+                var entries = commands.Select(c => (object)new
                 {
                     file = c.File,
                     arguments = c.Arguments,
@@ -420,15 +438,19 @@ namespace MSBuild.CompileCommands.Extractor
                     configuration = c.Configuration,
                     platform = c.Platform
                 });
-                json = JsonSerializer.Serialize(entries, new JsonSerializerOptions { WriteIndented = true });
+                var all = new object[] { sentinel }.Concat(entries).ToArray();
+                json = JsonSerializer.Serialize(all, jsonOptions);
             }
             else
             {
-                json = JsonSerializer.Serialize(commands, new JsonSerializerOptions
+                var entries = commands.Select(c => (object)new
                 {
-                    WriteIndented = true,
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                    file = c.File,
+                    arguments = c.Arguments,
+                    directory = c.Directory
                 });
+                var all = new object[] { sentinel }.Concat(entries).ToArray();
+                json = JsonSerializer.Serialize(all, jsonOptions);
             }
             File.WriteAllText(outputPath, json);
         }
@@ -679,40 +701,6 @@ namespace MSBuild.CompileCommands.Extractor
                 MSBuildLocator.RegisterInstance(instances[0]);
             else
                 MSBuildLocator.RegisterDefaults();
-        }
-
-        static void RunExtractInProcess(CommandLineOptions options)
-        {
-            if (options.Solutions.Length > 0)
-            {
-                InProcessExtractor.WriteCompileCommandsJsonFromSolution(
-                    options.Solutions[0], options.Configuration, options.Platform,
-                    options.EnableLogger, options.Output, options.VcToolsInstallDir);
-            }
-            else
-            {
-                var extractor = new InProcessExtractor(
-                    options.Projects[0], options.Configuration, options.Platform,
-                    options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir);
-                extractor.WriteCompileCommandsJson(options.Output);
-            }
-        }
-
-        static void RunExtractOutOfProcess(CommandLineOptions options)
-        {
-            if (options.Solutions.Length > 0)
-            {
-                OutOfProcessExtractor.WriteCompileCommandsJsonFromSolution(
-                    options.MsBuildPath!, options.Solutions[0], options.Configuration, options.Platform,
-                    options.EnableLogger, options.Output, options.VcToolsInstallDir, options.VcTargetsPath);
-            }
-            else
-            {
-                var extractor = new OutOfProcessExtractor(
-                    options.MsBuildPath!, options.Projects[0], options.Configuration, options.Platform,
-                    options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir, options.VcTargetsPath);
-                extractor.WriteCompileCommandsJson(options.Output);
-            }
         }
     }
 }
