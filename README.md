@@ -66,6 +66,7 @@ msbuild-extractor-sample --solution myapp.sln --msbuild-path "C:\VS\MSBuild\Curr
 ## Features
 
 - **Zero-config extraction** - auto-detects Visual Studio via `vswhere.exe`, resolves `VCTargetsPath`, `VCToolsInstallDir`, and real `cl.exe` path automatically
+- **No build required** - design-time extraction only; evaluates projects and runs `GetClCommandLines` without compiling anything
 - **Two extraction modes** - in-process (MSBuild API) and out-of-process (spawns MSBuild.exe, parses binlog) for maximum compatibility
 - **Multi-config** - `--all-configurations` extracts every `Configuration|Platform` combination; `--merge` combines them; `--deduplicate` produces one smart entry per file for IntelliSense
 - **Multi-input** - specify multiple `--solution` and `--project` arguments to merge across solutions
@@ -74,8 +75,12 @@ msbuild-extractor-sample --solution myapp.sln --msbuild-path "C:\VS\MSBuild\Curr
 - **Rich format** - `--format rich` outputs a hierarchical JSON schema with solutions, projects, configurations, structured includes/defines, and toolchain metadata
 - **GN project support** - extracts IntelliSense settings from GN-generated VS solutions (Chromium, Crashpad, WebRTC) via `ItemDefinitionGroup` fallback
 - **VS instance selection** - `--list-instances` shows all VS installations; `--vs-instance <id>` selects by instance ID
-- **LSP compatible** - clean JSON output (no extra keys), real `cl.exe` path, `-ferror-limit=0` and `--target` injection for optimal C++ LSP experience
+- **LSP compatible** - uses the real `cl.exe` path and adds `-ferror-limit=0` and `--target` so C++ LSP tools work out of the box
 - **Solution formats** - `.sln`, `.slnx`, and GN-generated `.sln` files
+- **C++/WinRT support** - resolves `WindowsTargetPlatformVersion` (e.g., `10.0` → `10.0.26100.0`) so UWP and WinRT projects like Windows Terminal and Calculator extract correctly
+- **Response file expansion** - transparently inlines `@response.rsp` files during tokenization
+- **VS Code integration** - `--c-cpp-properties` emits a matching `.vscode/c_cpp_properties.json` for the VS Code C/C++ extension
+- **Extensively tested** - validated across over 50 OSS projects (~77,000 compile commands)
 
 ## Installation
 
