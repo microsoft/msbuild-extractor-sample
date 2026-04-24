@@ -5,6 +5,9 @@ using System.Xml.Linq;
 
 namespace MSBuild.CompileCommands.Extractor
 {
+    public enum MsBuildLauncher { Auto, Cmd, Direct, Dotnet }
+    public enum IncludePathOrder { Auto, Prepend, Append }
+
     public class OutOfProcessExtractor : ICompileCommandsExtractor
     {
         private readonly string _msbuildPath;
@@ -15,6 +18,11 @@ namespace MSBuild.CompileCommands.Extractor
         private readonly string? _solutionDir;
         private readonly string? _vcToolsInstallDir;
         private readonly string? _vcTargetsPath;
+        private readonly string? _clPath;
+        private readonly IReadOnlyDictionary<string, string> _userProperties;
+        private readonly IReadOnlyDictionary<string, string> _userEnv;
+        private readonly MsBuildLauncher _launcher;
+        private readonly IncludePathOrder _includePathOrder;
 
         public OutOfProcessExtractor(
             string msbuildPath,
@@ -24,7 +32,12 @@ namespace MSBuild.CompileCommands.Extractor
             bool enableLogger = false,
             string? solutionDir = null,
             string? vcToolsInstallDir = null,
-            string? vcTargetsPath = null)
+            string? vcTargetsPath = null,
+            string? clPath = null,
+            IReadOnlyDictionary<string, string>? msbuildProperties = null,
+            IReadOnlyDictionary<string, string>? msbuildEnv = null,
+            MsBuildLauncher launcher = MsBuildLauncher.Auto,
+            IncludePathOrder includePathOrder = IncludePathOrder.Auto)
         {
             _msbuildPath = msbuildPath;
             _projectPath = Path.GetFullPath(projectPath);
@@ -36,6 +49,11 @@ namespace MSBuild.CompileCommands.Extractor
             if (_vcToolsInstallDir != null && !_vcToolsInstallDir.StartsWith(@"\\"))
                 _vcToolsInstallDir = _vcToolsInstallDir.Replace(@"\\", @"\");
             _vcTargetsPath = vcTargetsPath;
+            _clPath = clPath;
+            _userProperties = msbuildProperties ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            _userEnv = msbuildEnv ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            _launcher = launcher;
+            _includePathOrder = includePathOrder;
 
             if (!File.Exists(_msbuildPath))
                 throw new FileNotFoundException($"MSBuild not found: {_msbuildPath}");
@@ -192,9 +210,19 @@ namespace MSBuild.CompileCommands.Extractor
                 new("Configuration", _configuration),
                 new("Platform", _platform),
                 new("DesignTimeBuild", "true"),
-                new("BuildingInsideVisualStudio", "true"),
-                new("BuildProjectReferences", "true")
+                new("BuildingInsideVisualStudio", "true")
+                // Note: BuildProjectReferences is intentionally not set here. MSBuild's
+                // default is true (build dependencies to materialize outputs). VS sets
+                // it to false for design-time builds to avoid invoking the CL task on
+                // referenced projects; callers that want that behavior should pass
+                // --msbuild-property BuildProjectReferences=false.
             };
+
+            // Pass MicrosoftBuildCppTasksCommonPath if VCTargetsPath is set (needed for custom MSBuild environments)
+            if (_vcTargetsPath != null)
+            {
+                properties.Add(new("MicrosoftBuildCppTasksCommonPath", _vcTargetsPath.EndsWith('\\') ? _vcTargetsPath : _vcTargetsPath + "\\"));
+            }
 
             if (_solutionDir != null)
             {
@@ -202,13 +230,22 @@ namespace MSBuild.CompileCommands.Extractor
                 properties.Add(new("SolutionDir", dir));
             }
 
-            if (_vcToolsInstallDir != null)
+            // Skip VCToolsInstallDir when MicrosoftBuildCppTasksCommonPath is set
+            // (custom MSBuild environments manage their own tool paths)
+            if (_vcToolsInstallDir != null && !properties.Any(p => p.Key == "MicrosoftBuildCppTasksCommonPath"))
             {
                 var dir = _vcToolsInstallDir.StartsWith(@"\\")
                     ? _vcToolsInstallDir
                     : _vcToolsInstallDir.Replace(@"\\", @"\");
                 dir = dir.EndsWith('\\') ? dir : dir + "\\";
                 properties.Add(new("VCToolsInstallDir", dir));
+            }
+
+            // Apply user-supplied --msbuild-property overrides last so they win over our defaults.
+            foreach (var kv in _userProperties)
+            {
+                properties.RemoveAll(p => string.Equals(p.Key, kv.Key, StringComparison.OrdinalIgnoreCase));
+                properties.Add(new(kv.Key, kv.Value));
             }
 
             // Don't set WindowsTargetPlatformVersion as a global property — it would
@@ -230,54 +267,138 @@ namespace MSBuild.CompileCommands.Extractor
                 CreateNoWindow = true
             };
 
-            if (_dotnetExePath != null)
+            // For .cmd/.bat MSBuild wrappers, use cmd.exe /c to ensure proper
+            // batch script execution (init scripts, environment setup, etc.)
+            // The default (auto) sniffs the file extension; users may override
+            // via --msbuild-launcher cmd|direct|dotnet to force a specific mode.
+            bool isCmdWrapper;
+            switch (_launcher)
+            {
+                case MsBuildLauncher.Cmd:
+                    isCmdWrapper = true;
+                    break;
+                case MsBuildLauncher.Direct:
+                    isCmdWrapper = false;
+                    break;
+                case MsBuildLauncher.Dotnet:
+                    // Force dotnet exec path; treat like a .dll (handled below).
+                    isCmdWrapper = false;
+                    break;
+                default: // Auto
+                    isCmdWrapper = _msbuildPath.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
+                                || _msbuildPath.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
+                    break;
+            }
+
+            if (_dotnetExePath != null || _launcher == MsBuildLauncher.Dotnet)
             {
                 // MSBuild.dll: run via "dotnet exec MSBuild.dll ..."
-                startInfo.FileName = _dotnetExePath;
+                var dotnet = _dotnetExePath ?? FindDotnetExe()
+                    ?? throw new FileNotFoundException("--msbuild-launcher dotnet was requested but 'dotnet' was not found on PATH.");
+                startInfo.FileName = dotnet;
                 startInfo.ArgumentList.Add("exec");
                 startInfo.ArgumentList.Add(_msbuildPath);
+            }
+            else if (isCmdWrapper)
+            {
+                // For .cmd wrappers: build a single command string for cmd.exe /c
+                // This ensures batch init scripts run correctly
+                startInfo.FileName = "cmd.exe";
             }
             else
             {
                 startInfo.FileName = _msbuildPath;
             }
 
-            startInfo.ArgumentList.Add(_projectPath);
-            startInfo.ArgumentList.Add("/t:GetClCommandLines");
+            var msbuildArgs = new List<string>();
+            msbuildArgs.Add(_projectPath);
+            msbuildArgs.Add("/t:GetClCommandLines");
 
             // Use separate /p: per property to avoid issues with semicolons
             // or special characters in property values
             foreach (var prop in properties)
-                startInfo.ArgumentList.Add($"/p:{prop.Key}={prop.Value}");
+                msbuildArgs.Add($"/p:{prop.Key}={prop.Value}");
 
-            startInfo.ArgumentList.Add($"/bl:{binlogPath}");
-            startInfo.ArgumentList.Add("/nologo");
-            startInfo.ArgumentList.Add("/v:quiet");
+            msbuildArgs.Add($"/bl:{binlogPath}");
+            msbuildArgs.Add("/nologo");
+            msbuildArgs.Add("/v:quiet");
 
-            if (_vcTargetsPath != null)
+            if (isCmdWrapper)
             {
-                var path = _vcTargetsPath.EndsWith('\\') ? _vcTargetsPath : _vcTargetsPath + "\\";
-                startInfo.Environment["VCTargetsPath"] = path;
+                // Build single command string for cmd.exe /c
+                var quotedArgs = msbuildArgs.Select(a => a.Contains(' ') ? $"\"{a}\"" : a);
+                startInfo.Arguments = $"/c \"{_msbuildPath}\" {string.Join(" ", quotedArgs)}";
+
+                // When using a .cmd/.bat wrapper that launches .NET Framework MSBuild,
+                // clear .NET SDK environment variables inherited from the dotnet host process.
+                // These vars (MSBuildExtensionsPath, MSBUILD_EXE_PATH, etc.) cause .NET Framework
+                // MSBuild to resolve targets from the .NET SDK instead of its own directory,
+                // breaking target resolution (e.g., ResolveReferences not found).
+                var dotnetSdkVarsToClean = new[]
+                {
+                    "MSBuildExtensionsPath",
+                    "MSBuildSDKsPath",
+                    "MSBUILD_EXE_PATH",
+                    "MSBuildLoadMicrosoftTargetsReadOnly",
+                    "MSBUILDFAILONDRIVEENUMERATINGWILDCARD",
+                    "_MSBUILDTLENABLED",
+                    "DOTNET_HOST_PATH",
+                    "VCTargetsPath"
+                };
+                foreach (var varName in dotnetSdkVarsToClean)
+                {
+                    startInfo.Environment[varName] = "";
+                }
+            }
+            else
+            {
+                foreach (var arg in msbuildArgs)
+                    startInfo.ArgumentList.Add(arg);
             }
 
-            if (_vcToolsInstallDir != null)
+            // Set environment variables for non-.cmd cases
+            if (!isCmdWrapper)
             {
-                var dir = _vcToolsInstallDir.StartsWith(@"\\")
-                    ? _vcToolsInstallDir
-                    : _vcToolsInstallDir.Replace(@"\\", @"\");
-                dir = dir.EndsWith('\\') ? dir : dir + "\\";
-                startInfo.Environment["VCToolsInstallDir"] = dir;
+                // Only set VCTargetsPath env var if not using MicrosoftBuildCppTasksCommonPath
+                if (_vcTargetsPath != null && !properties.Any(p => p.Key == "MicrosoftBuildCppTasksCommonPath"))
+                {
+                    var path = _vcTargetsPath.EndsWith('\\') ? _vcTargetsPath : _vcTargetsPath + "\\";
+                    startInfo.Environment["VCTargetsPath"] = path;
+                }
+
+                if (_vcToolsInstallDir != null)
+                {
+                    var dir = _vcToolsInstallDir.StartsWith(@"\\")
+                        ? _vcToolsInstallDir
+                        : _vcToolsInstallDir.Replace(@"\\", @"\");
+                    dir = dir.EndsWith('\\') ? dir : dir + "\\";
+                    startInfo.Environment["VCToolsInstallDir"] = dir;
+                }
+            }
+
+            // Apply user-supplied --msbuild-env overrides last so they win over our defaults
+            // (including the .NET-SDK clear-list above and VCTargetsPath/VCToolsInstallDir).
+            foreach (var kv in _userEnv)
+            {
+                startInfo.Environment[kv.Key] = kv.Value;
             }
 
             if (_enableLogger)
             {
-                var cmdLine = _dotnetExePath != null
-                    ? $"dotnet exec \"{_msbuildPath}\""
-                    : $"\"{_msbuildPath}\"";
-                var args = string.Join(" ", startInfo.ArgumentList
-                    .Skip(_dotnetExePath != null ? 2 : 0)
-                    .Select(a => a.Contains(' ') ? $"\"{a}\"" : a));
-                Console.WriteLine($"Running: {cmdLine} {args}");
+                if (isCmdWrapper)
+                {
+                    Console.WriteLine($"Running: cmd.exe {startInfo.Arguments}");
+                }
+                else
+                {
+                    var cmdLine = _dotnetExePath != null
+                        ? $"dotnet exec \"{_msbuildPath}\""
+                        : $"\"{_msbuildPath}\"";
+                    var args = string.Join(" ", startInfo.ArgumentList
+                        .Skip(_dotnetExePath != null ? 2 : 0)
+                        .Select(a => a.Contains(' ') ? $"\"{a}\"" : a));
+                    Console.WriteLine($"Running: {cmdLine} {args}");
+                }
             }
 
             using var process = System.Diagnostics.Process.Start(startInfo);
@@ -459,18 +580,26 @@ namespace MSBuild.CompileCommands.Extractor
                 // stops parsing and cascades into hundreds of false diagnostics.
                 baseArgs.Add("-ferror-limit=0");
 
-                foreach (var includePath in _externalIncludePaths)
-                {
-                    baseArgs.Add($"/I{includePath}");
-                }
+                // Decide where to place system include paths (from IncludePath / ExternalIncludePath MSBuild properties)
+                // relative to the project's /I flags from AdditionalIncludeDirectories.
+                //
+                // The default (Auto) classifies each path:
+                //   - paths inside the project tree are prepended (preserving the historical behavior
+                //     for projects like SDL that put source dirs in IncludePath),
+                //   - paths outside the project tree are appended (matching cl.exe semantics where
+                //     INCLUDE env-var paths are searched after explicit /I,
+                //     avoiding header shadowing such as DevDiv\inc\VS\version.h hiding a generated version.h).
+                var allSystemIncludes = _externalIncludePaths.Concat(_includePaths).ToArray();
+                var (prependIncludes, appendIncludes) = ClassifyIncludePaths(allSystemIncludes);
 
-                foreach (var includePath in _includePaths)
-                {
-                    baseArgs.Add($"/I{includePath}");
-                }
+                foreach (var p in prependIncludes)
+                    baseArgs.Add($"/I{p}");
 
                 baseArgs.AddRange(CommandLineTokenizer.TokenizeWithResponseFiles(
                     entry.CommandLine, entry.WorkingDirectory));
+
+                foreach (var p in appendIncludes)
+                    baseArgs.Add($"/I{p}");
 
                 // Merge two-arg /external:I flags into single token.
                 // MSBuild emits "/external:I" "<path>" as separate tokens but
@@ -516,8 +645,48 @@ namespace MSBuild.CompileCommands.Extractor
             return commands;
         }
 
+        private (string[] prepend, string[] append) ClassifyIncludePaths(string[] all)
+        {
+            switch (_includePathOrder)
+            {
+                case IncludePathOrder.Prepend:
+                    return (all, Array.Empty<string>());
+                case IncludePathOrder.Append:
+                    return (Array.Empty<string>(), all);
+                default: // Auto: per-path classification by project-tree containment
+                {
+                    var projectDir = Path.GetDirectoryName(_projectPath);
+                    if (string.IsNullOrEmpty(projectDir))
+                        return (Array.Empty<string>(), all);
+
+                    var projectDirNorm = NormalizePath(projectDir);
+                    var prepend = new List<string>();
+                    var append = new List<string>();
+                    foreach (var p in all)
+                    {
+                        var n = NormalizePath(p);
+                        if (n.StartsWith(projectDirNorm, StringComparison.OrdinalIgnoreCase))
+                            prepend.Add(p);
+                        else
+                            append.Add(p);
+                    }
+                    return (prepend.ToArray(), append.ToArray());
+                }
+            }
+        }
+
+        private static string NormalizePath(string p)
+        {
+            try { return Path.GetFullPath(p).TrimEnd('\\') + "\\"; }
+            catch { return p.TrimEnd('\\') + "\\"; }
+        }
+
         private string ResolveToolPath(string toolPath)
         {
+            // User-specified --cl-path takes highest priority
+            if (!string.IsNullOrEmpty(_clPath) && File.Exists(_clPath))
+                return _clPath;
+
             if (toolPath.Contains("system32", StringComparison.OrdinalIgnoreCase) &&
                 toolPath.EndsWith("CL.exe", StringComparison.OrdinalIgnoreCase))
             {
@@ -675,9 +844,11 @@ namespace MSBuild.CompileCommands.Extractor
                 baseArgs.Add($"--target={target}");
             baseArgs.Add("-ferror-limit=0");
 
-            foreach (var p in _externalIncludePaths)
-                baseArgs.Add($"/I{p}");
-            foreach (var p in _includePaths)
+            // Classify system include paths via the same policy as the main path.
+            var allSystemIncludes2 = _externalIncludePaths.Concat(_includePaths).ToArray();
+            var (prepend2, append2) = ClassifyIncludePaths(allSystemIncludes2);
+
+            foreach (var p in prepend2)
                 baseArgs.Add($"/I{p}");
 
             // Add /I from AdditionalIncludeDirectories
@@ -690,6 +861,9 @@ namespace MSBuild.CompileCommands.Extractor
                     : Path.GetFullPath(Path.Combine(projectDir, trimmed));
                 baseArgs.Add($"/I{resolved}");
             }
+
+            foreach (var p in append2)
+                baseArgs.Add($"/I{p}");
 
             // Add /D from PreprocessorDefinitions
             foreach (var def in preprocessorDefs.Split(';', StringSplitOptions.RemoveEmptyEntries))
@@ -781,7 +955,11 @@ namespace MSBuild.CompileCommands.Extractor
         public static List<CompileCommand> ExtractCompileCommandsFromSolution(
             string msbuildPath, string solutionPath, string configuration = "Debug",
             string platform = "x64", bool enableLogger = false,
-            string? vcToolsInstallDir = null, string? vcTargetsPath = null)
+            string? vcToolsInstallDir = null, string? vcTargetsPath = null,
+            IReadOnlyDictionary<string, string>? msbuildProperties = null,
+            IReadOnlyDictionary<string, string>? msbuildEnv = null,
+            MsBuildLauncher launcher = MsBuildLauncher.Auto,
+            IncludePathOrder includePathOrder = IncludePathOrder.Auto)
         {
             var solutionDir = Path.GetDirectoryName(Path.GetFullPath(solutionPath))!;
             var projects = ProjectDiscovery.GetVcProjectsFromSolution(solutionPath);
@@ -793,7 +971,11 @@ namespace MSBuild.CompileCommands.Extractor
                 {
                     var extractor = new OutOfProcessExtractor(
                         msbuildPath, project.Path, configuration, platform, enableLogger,
-                        solutionDir, vcToolsInstallDir, vcTargetsPath);
+                        solutionDir, vcToolsInstallDir, vcTargetsPath,
+                        msbuildProperties: msbuildProperties,
+                        msbuildEnv: msbuildEnv,
+                        launcher: launcher,
+                        includePathOrder: includePathOrder);
                     allCommands.AddRange(extractor.ExtractCompileCommands());
                 }
                 catch (Exception ex)

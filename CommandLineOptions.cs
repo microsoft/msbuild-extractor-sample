@@ -32,6 +32,10 @@ namespace MSBuild.CompileCommands.Extractor
         public bool ListInstances { get; set; }
         public string? VsInstance { get; set; }
         public bool EmitCCppProperties { get; set; }
+        public Dictionary<string, string> MsBuildProperties { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> MsBuildEnv { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public string MsBuildLauncher { get; set; } = "auto";
+        public string IncludePathOrder { get; set; } = "auto";
 
         public static CommandLineOptions Parse(string[] args)
         {
@@ -173,6 +177,32 @@ namespace MSBuild.CompileCommands.Extractor
                 DefaultValueFactory = _ => false
             };
 
+            var msbuildPropertyOption = new Option<string[]>("--msbuild-property")
+            {
+                Description = "Pass an MSBuild global property as KEY=VALUE (repeatable). Overrides built-in defaults (e.g. BuildProjectReferences=true).",
+                AllowMultipleArgumentsPerToken = false
+            };
+
+            var msbuildEnvOption = new Option<string[]>("--msbuild-env")
+            {
+                Description = "Set an environment variable for the MSBuild process as KEY=VALUE (repeatable). Overrides built-in defaults.",
+                AllowMultipleArgumentsPerToken = false
+            };
+
+            var msbuildLauncherOption = new Option<string>("--msbuild-launcher")
+            {
+                Description = "How to launch MSBuild: auto (sniff extension, default), cmd (force cmd.exe /c wrapper), direct (run executable directly), dotnet (force dotnet exec)",
+                DefaultValueFactory = _ => "auto"
+            };
+            msbuildLauncherOption.AcceptOnlyFromAmong("auto", "cmd", "direct", "dotnet");
+
+            var includePathOrderOption = new Option<string>("--include-path-order")
+            {
+                Description = "Where to place include paths from MSBuild's IncludePath/ExternalIncludePath properties: auto (per-path heuristic, default), prepend (before /I), append (after /I, matches cl.exe INCLUDE-env semantics)",
+                DefaultValueFactory = _ => "auto"
+            };
+            includePathOrderOption.AcceptOnlyFromAmong("auto", "prepend", "append");
+
             var rootCommand = new RootCommand("Extract compile_commands.json from Visual C++ MSBuild projects");
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(solutionOption);
@@ -198,6 +228,10 @@ namespace MSBuild.CompileCommands.Extractor
             rootCommand.Options.Add(listInstancesOption);
             rootCommand.Options.Add(vsInstanceOption);
             rootCommand.Options.Add(cCppPropertiesOption);
+            rootCommand.Options.Add(msbuildPropertyOption);
+            rootCommand.Options.Add(msbuildEnvOption);
+            rootCommand.Options.Add(msbuildLauncherOption);
+            rootCommand.Options.Add(includePathOrderOption);
 
             rootCommand.Validators.Add(commandResult =>
             {
@@ -242,7 +276,11 @@ namespace MSBuild.CompileCommands.Extractor
                     PreferPlatform = parseResult.GetValue(preferPlatformOption)!,
                     ListInstances = parseResult.GetValue(listInstancesOption),
                     VsInstance = parseResult.GetValue(vsInstanceOption),
-                    EmitCCppProperties = parseResult.GetValue(cCppPropertiesOption)
+                    EmitCCppProperties = parseResult.GetValue(cCppPropertiesOption),
+                    MsBuildProperties = ParseKeyValuePairs(parseResult.GetValue(msbuildPropertyOption), "--msbuild-property"),
+                    MsBuildEnv = ParseKeyValuePairs(parseResult.GetValue(msbuildEnvOption), "--msbuild-env"),
+                    MsBuildLauncher = parseResult.GetValue(msbuildLauncherOption)!,
+                    IncludePathOrder = parseResult.GetValue(includePathOrderOption)!
                 };
             });
 
@@ -252,6 +290,20 @@ namespace MSBuild.CompileCommands.Extractor
                 Environment.Exit(exitCode);
 
             return result;
+        }
+
+        private static Dictionary<string, string> ParseKeyValuePairs(string[]? values, string flagName)
+        {
+            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (values == null) return dict;
+            foreach (var v in values)
+            {
+                var eq = v.IndexOf('=');
+                if (eq <= 0)
+                    throw new ArgumentException($"{flagName} value '{v}' must be in KEY=VALUE form.");
+                dict[v.Substring(0, eq)] = v.Substring(eq + 1);
+            }
+            return dict;
         }
     }
 }

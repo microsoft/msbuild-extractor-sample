@@ -332,7 +332,12 @@ namespace MSBuild.CompileCommands.Extractor
             {
                 var extractor = new OutOfProcessExtractor(
                     options.MsBuildPath!, options.Projects[0], options.Configuration, options.Platform,
-                    options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir, options.VcTargetsPath);
+                    options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir, options.VcTargetsPath,
+                    options.ClPath,
+                    msbuildProperties: options.MsBuildProperties,
+                    msbuildEnv: options.MsBuildEnv,
+                    launcher: ParseLauncher(options.MsBuildLauncher),
+                    includePathOrder: ParseIncludePathOrder(options.IncludePathOrder));
                 return extractor.ExtractCompileCommands();
             }
         }
@@ -351,7 +356,11 @@ namespace MSBuild.CompileCommands.Extractor
                     if (isOutOfProcess)
                         commands = OutOfProcessExtractor.ExtractCompileCommandsFromSolution(
                             options.MsBuildPath!, sln, options.Configuration, options.Platform,
-                            options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath);
+                            options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath,
+                            msbuildProperties: options.MsBuildProperties,
+                            msbuildEnv: options.MsBuildEnv,
+                            launcher: ParseLauncher(options.MsBuildLauncher),
+                            includePathOrder: ParseIncludePathOrder(options.IncludePathOrder));
                     else
                         commands = InProcessExtractor.ExtractCompileCommandsFromSolution(
                             sln, options.Configuration, options.Platform,
@@ -375,7 +384,12 @@ namespace MSBuild.CompileCommands.Extractor
                     {
                         var extractor = new OutOfProcessExtractor(
                             options.MsBuildPath!, proj, options.Configuration, options.Platform,
-                            options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir, options.VcTargetsPath);
+                            options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir, options.VcTargetsPath,
+                            options.ClPath,
+                            msbuildProperties: options.MsBuildProperties,
+                            msbuildEnv: options.MsBuildEnv,
+                            launcher: ParseLauncher(options.MsBuildLauncher),
+                            includePathOrder: ParseIncludePathOrder(options.IncludePathOrder));
                         commands = extractor.ExtractCompileCommands();
                     }
                     else
@@ -702,5 +716,20 @@ namespace MSBuild.CompileCommands.Extractor
             else
                 MSBuildLocator.RegisterDefaults();
         }
+
+        private static MsBuildLauncher ParseLauncher(string s) => s.ToLowerInvariant() switch
+        {
+            "cmd" => MsBuildLauncher.Cmd,
+            "direct" => MsBuildLauncher.Direct,
+            "dotnet" => MsBuildLauncher.Dotnet,
+            _ => MsBuildLauncher.Auto
+        };
+
+        private static IncludePathOrder ParseIncludePathOrder(string s) => s.ToLowerInvariant() switch
+        {
+            "prepend" => IncludePathOrder.Prepend,
+            "append" => IncludePathOrder.Append,
+            _ => IncludePathOrder.Auto
+        };
     }
 }
