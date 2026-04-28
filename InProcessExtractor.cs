@@ -14,6 +14,8 @@ namespace MSBuild.CompileCommands.Extractor
         private readonly string _platform;
         private readonly Dictionary<string, string> _globalProperties;
         private readonly string? _vcToolsInstallDir;
+        private readonly bool _emitDefaults;
+        private readonly bool _mergeDefaults;
         private string[] _externalIncludePaths = [];
         private string[] _includePaths = [];
         private string? _fixupPropsPath;
@@ -22,8 +24,7 @@ namespace MSBuild.CompileCommands.Extractor
         // that appear in IncludePath when GetPropertyValue doesn't fully evaluate intrinsics.
         private static string? TryResolveMsBuildExpression(string expr)
         {
-            var match = Regex.Match(expr,
-                @"\$\(\[MSBuild\]::NormalizePath\('([^']+)'(?:.*?)(?:\)\))?(.*)$");
+            var match = Regex.Match(expr, @"\$\(\[MSBuild\]::NormalizePath\('([^']+)'(?:.*?)(?:\)\))?(.*)$");
             if (match.Success)
             {
                 var basePath = match.Groups[1].Value;
@@ -41,19 +42,19 @@ namespace MSBuild.CompileCommands.Extractor
 
         private static IEnumerable<string> ResolveIncludePathEntries(IEnumerable<string> entries)
         {
-            foreach (var p in entries)
+            foreach (var entry in entries)
             {
-                if (string.IsNullOrWhiteSpace(p)) continue;
-                if (!p.StartsWith("$("))
+                if (string.IsNullOrWhiteSpace(entry)) continue;
+                if (!entry.StartsWith("$("))
                 {
                     string resolved;
-                    try { resolved = Uri.UnescapeDataString(p.Trim()); } catch { resolved = p.Trim(); }
+                    try { resolved = Uri.UnescapeDataString(entry.Trim()); } catch { resolved = entry.Trim(); }
                     if (!string.IsNullOrEmpty(resolved))
                         yield return resolved;
                 }
                 else
                 {
-                    var resolved = TryResolveMsBuildExpression(p);
+                    var resolved = TryResolveMsBuildExpression(entry);
                     if (resolved != null)
                         yield return resolved;
                 }
@@ -81,13 +82,246 @@ namespace MSBuild.CompileCommands.Extractor
             catch { return []; }
         }
 
+        /// <summary>
+        /// Detects the NETFXKitsDir by enumerating installed versions under
+        /// %ProgramFiles(x86)%\Windows Kits\NETFXSDK and picking the highest.
+        /// Returns the path with a trailing backslash, or null if not found.
+        /// </summary>
+        internal static string? FindNETFXKitsDir()
+        {
+            try
+            {
+                var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+                var netfxSdkRoot = Path.Combine(programFilesX86, "Windows Kits", "NETFXSDK");
+                if (!Directory.Exists(netfxSdkRoot)) return null;
+
+                var best = Directory.GetDirectories(netfxSdkRoot)
+                    .Select(d => new { Path = d, Name = Path.GetFileName(d) })
+                    .Where(d => Version.TryParse(d.Name, out _))
+                    .OrderByDescending(d => Version.Parse(d.Name))
+                    .FirstOrDefault();
+
+                if (best == null) return null;
+                return best.Path.EndsWith('\\') ? best.Path : best.Path + "\\";
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Replaces unresolved MSBuild fallback values (e.g., "VCInstallDir_170_is_not_defined")
+        /// in compiler arguments with the correct resolved paths. Removes include path
+        /// arguments that still contain unresolved placeholders after replacement.
+        /// </summary>
+        internal static string[] SanitizeFallbackPaths(string[] args, string? vcToolsInstallDir)
+        {
+            // Build replacement map
+            var replacements = new List<(string Placeholder, string Replacement)>();
+
+            if (vcToolsInstallDir != null)
+            {
+                try
+                {
+                    var vcDir = Path.GetFullPath(Path.Combine(vcToolsInstallDir, "..", "..", ".."));
+                    if (Directory.Exists(vcDir))
+                    {
+                        var vcDirSlash = vcDir.EndsWith('\\') ? vcDir : vcDir + "\\";
+                        // Handle any version suffix: VCInstallDir_170, VCInstallDir_180, etc.
+                        // The fallback format is: <PropertyName>_is_not_defined or <PropertyName>_is not_defined
+                        replacements.Add(("VCInstallDir_170_is_not_defined", vcDirSlash));
+                        replacements.Add(("VCInstallDir_180_is_not_defined", vcDirSlash));
+                        replacements.Add(("VCInstallDir_is_not_defined", vcDirSlash));
+                        replacements.Add(("VCInstallDir_170_is not_defined", vcDirSlash));
+                        replacements.Add(("VCInstallDir_180_is not_defined", vcDirSlash));
+                    }
+
+                    var vtNorm = vcToolsInstallDir.EndsWith('\\') ? vcToolsInstallDir : vcToolsInstallDir + "\\";
+                    replacements.Add(("VCToolsInstallDir_170_is_not_defined", vtNorm));
+                    replacements.Add(("VCToolsInstallDir_180_is_not_defined", vtNorm));
+                    replacements.Add(("VCToolsInstallDir_is_not_defined", vtNorm));
+                    replacements.Add(("VCToolsInstallDir_170_is not_defined", vtNorm));
+                    replacements.Add(("VCToolsInstallDir_180_is not_defined", vtNorm));
+                }
+                catch { }
+            }
+
+            var netfxDir = FindNETFXKitsDir();
+            if (netfxDir != null)
+            {
+                replacements.Add(("NETFXKitsDir_is not_defined", netfxDir));
+                replacements.Add(("NETFXKitsDir_is_not_defined", netfxDir));
+            }
+
+            if (replacements.Count == 0) return args;
+
+            var result = new List<string>(args.Length);
+            for (int i = 0; i < args.Length; i++)
+            {
+                var arg = args[i];
+
+                // Apply known replacements
+                foreach (var (placeholder, replacement) in replacements)
+                {
+                    if (arg.Contains(placeholder, StringComparison.OrdinalIgnoreCase))
+                        arg = arg.Replace(placeholder, replacement, StringComparison.OrdinalIgnoreCase);
+                }
+
+                // Check for any remaining unresolved placeholders
+                if (arg.Contains("_is_not_defined", StringComparison.OrdinalIgnoreCase) ||
+                    arg.Contains("_is not_defined", StringComparison.OrdinalIgnoreCase))
+                {
+                    // For /I or /external:I with a separate path arg, skip both
+                    if ((arg.Equals("/I", StringComparison.OrdinalIgnoreCase) ||
+                         arg.Equals("/external:I", StringComparison.OrdinalIgnoreCase)) &&
+                        i + 1 < args.Length)
+                    {
+                        i++; // skip path arg too
+                    }
+                    continue; // drop this arg
+                }
+
+                result.Add(arg);
+            }
+
+            return result.ToArray();
+        }
+
+        /// <summary>
+        /// Merges flags from the project-wide default entry into a per-file argument
+        /// list. Only adds flags that are not already present, so per-file overrides
+        /// are preserved. Handles /D, /I, /std:, /W, /EH, /GR, /MD, /MT and other
+        /// switch families by checking the prefix.
+        /// </summary>
+        internal static void MergeDefaultFlags(List<string> fileArgs, string[] defaultArgs)
+        {
+            // Build a set of flag prefixes already present in the per-file args.
+            // For /D and /I we track the full value; for others we track the prefix.
+            var existingDefines = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var existingIncludes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var existingPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var a in fileArgs)
+            {
+                if (a.StartsWith("/D", StringComparison.OrdinalIgnoreCase) && a.Length > 2)
+                    existingDefines.Add(a);
+                else if (a.StartsWith("/I", StringComparison.OrdinalIgnoreCase) && a.Length > 2)
+                    existingIncludes.Add(a);
+                else if (a.StartsWith("/std:", StringComparison.OrdinalIgnoreCase))
+                    existingPrefixes.Add("/std:");
+                else if (a.StartsWith("/EH", StringComparison.OrdinalIgnoreCase))
+                    existingPrefixes.Add("/EH");
+                else if (a.StartsWith("/GR", StringComparison.OrdinalIgnoreCase))
+                    existingPrefixes.Add("/GR");
+                else if (a.StartsWith("/MD", StringComparison.OrdinalIgnoreCase) ||
+                         a.StartsWith("/MT", StringComparison.OrdinalIgnoreCase))
+                    existingPrefixes.Add("/M");
+                else if (a.StartsWith("/W", StringComparison.OrdinalIgnoreCase) && a.Length > 2)
+                    existingPrefixes.Add("/W");
+                else if (a.StartsWith("/Zc:", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Track each /Zc: sub-option separately (e.g. /Zc:wchar_t, /Zc:forScope)
+                    var colonEnd = a.IndexOf('-');
+                    if (colonEnd < 0) colonEnd = a.Length;
+                    existingPrefixes.Add(a[..colonEnd]);
+                }
+            }
+
+            // Insert new flags from defaults just before the source file (last element).
+            int insertPos = fileArgs.Count - 1;
+
+            foreach (var a in defaultArgs)
+            {
+                // Skip cl.exe path, --target, -ferror-limit (already in baseArgs)
+                if (a.StartsWith("--target=", StringComparison.OrdinalIgnoreCase) ||
+                    a.StartsWith("-ferror-limit", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Skip build-output flags
+                if (a.StartsWith("/Fo", StringComparison.OrdinalIgnoreCase) ||
+                    a.StartsWith("/Fd", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (a.StartsWith("/D", StringComparison.OrdinalIgnoreCase) && a.Length > 2)
+                {
+                    if (!existingDefines.Contains(a))
+                    {
+                        fileArgs.Insert(insertPos++, a);
+                        existingDefines.Add(a);
+                    }
+                }
+                else if (a.StartsWith("/I", StringComparison.OrdinalIgnoreCase) && a.Length > 2)
+                {
+                    if (!existingIncludes.Contains(a))
+                    {
+                        fileArgs.Insert(insertPos++, a);
+                        existingIncludes.Add(a);
+                    }
+                }
+                else if (a.StartsWith("/std:", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!existingPrefixes.Contains("/std:"))
+                    {
+                        fileArgs.Insert(insertPos++, a);
+                        existingPrefixes.Add("/std:");
+                    }
+                }
+                else if (a.StartsWith("/EH", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!existingPrefixes.Contains("/EH"))
+                    {
+                        fileArgs.Insert(insertPos++, a);
+                        existingPrefixes.Add("/EH");
+                    }
+                }
+                else if (a.StartsWith("/GR", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!existingPrefixes.Contains("/GR"))
+                    {
+                        fileArgs.Insert(insertPos++, a);
+                        existingPrefixes.Add("/GR");
+                    }
+                }
+                else if (a.StartsWith("/MD", StringComparison.OrdinalIgnoreCase) ||
+                         a.StartsWith("/MT", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!existingPrefixes.Contains("/M"))
+                    {
+                        fileArgs.Insert(insertPos++, a);
+                        existingPrefixes.Add("/M");
+                    }
+                }
+                else if (a.StartsWith("/W", StringComparison.OrdinalIgnoreCase) && a.Length > 2 &&
+                         !a.StartsWith("/we", StringComparison.OrdinalIgnoreCase) &&
+                         !a.StartsWith("/wd", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!existingPrefixes.Contains("/W"))
+                    {
+                        fileArgs.Insert(insertPos++, a);
+                        existingPrefixes.Add("/W");
+                    }
+                }
+                else if (a.StartsWith("/Zc:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var colonEnd = a.IndexOf('-');
+                    if (colonEnd < 0) colonEnd = a.Length;
+                    var key = a[..colonEnd];
+                    if (!existingPrefixes.Contains(key))
+                    {
+                        fileArgs.Insert(insertPos++, a);
+                        existingPrefixes.Add(key);
+                    }
+                }
+            }
+        }
+
         public InProcessExtractor(
             string projectPath,
             string configuration = "Debug",
             string platform = "x64",
             bool enableLogger = false,
             string? solutionDir = null,
-            string? vcToolsInstallDir = null)
+            string? vcToolsInstallDir = null,
+            bool emitDefaults = false,
+            bool mergeDefaults = false)
         {
             _projectPath = Path.GetFullPath(projectPath);
 
@@ -98,6 +332,8 @@ namespace MSBuild.CompileCommands.Extractor
             _enableLogger = enableLogger;
             _configuration = configuration;
             _platform = platform;
+            _emitDefaults = emitDefaults;
+            _mergeDefaults = mergeDefaults;
             _vcToolsInstallDir = vcToolsInstallDir?.TrimEnd('\\');
             if (_vcToolsInstallDir != null && !_vcToolsInstallDir.StartsWith(@"\\"))
                 _vcToolsInstallDir = _vcToolsInstallDir.Replace(@"\\", @"\");
@@ -108,7 +344,11 @@ namespace MSBuild.CompileCommands.Extractor
                 { "Platform", platform },
                 { "DesignTimeBuild", "true" },
                 { "BuildingInsideVisualStudio", "true" },
-                { "BuildProjectReferences", "true" },
+                // Design-time builds should not build referenced projects.
+                { "BuildProjectReferences", "false" },
+                // Stable locale for MSBuild error strings.
+                // MSBuild error strings and task messages.
+                { "LangID", "1033" },
                 // VC++ projects use OutDir, not OutputPath. When the .NET SDK's
                 // _CheckForInvalidConfigurationAndPlatform target runs, it fails
                 // if OutputPath is empty. SkipInvalidConfigurations bypasses this.
@@ -139,7 +379,29 @@ namespace MSBuild.CompileCommands.Extractor
                     : vcToolsInstallDir.Replace(@"\\", @"\");
                 _globalProperties["VCToolsInstallDir"] = normalized.EndsWith('\\')
                     ? normalized : normalized + "\\";
+
+                // Derive VCInstallDir from VCToolsInstallDir.
+                // VCToolsInstallDir is like ...\VC\Tools\MSVC\14.x; go up 3 levels to get ...\VC\.
+                // Setting VCInstallDir as a global property prevents repo-specific props files
+                // (e.g., Microsoft.Cpp.VCTools.props) from overriding it with placeholder values
+                // like "VCInstallDir_170_is_not_defined" when VCInstallDir_170 isn't set.
+                try
+                {
+                    var vcInstallDir = Path.GetFullPath(Path.Combine(normalized, "..", "..", ".."));
+                    if (Directory.Exists(vcInstallDir))
+                    {
+                        var vcInstallDirNorm = vcInstallDir.EndsWith('\\') ? vcInstallDir : vcInstallDir + "\\";
+                        _globalProperties["VCInstallDir"] = vcInstallDirNorm;
+                    }
+                }
+                catch { /* best-effort */ }
             }
+
+            // Detect and set NETFXKitsDir to prevent unresolved fallback values.
+            // Enumerate installed versions and pick the highest.
+            var netfxKitsDir = FindNETFXKitsDir();
+            if (netfxKitsDir != null)
+                _globalProperties["NETFXKitsDir"] = netfxKitsDir;
 
             // WindowsTargetPlatformVersion is resolved after project evaluation
             // so that projects with explicit full versions aren't overridden.
@@ -217,31 +479,57 @@ namespace MSBuild.CompileCommands.Extractor
             // throws MSB4096. Ensure all items have the metadata defined (even if empty).
             EnsureClCompileMetadataConsistency(projectInstance);
 
-            var externalIncludes = projectInstance.GetPropertyValue("ExternalIncludePath");
-            if (!string.IsNullOrEmpty(externalIncludes))
+            // IncludePath / ExternalIncludePath are read from the GetProjectDirectories
+            // target output below (authoritative source that handles UseEnv=true and Makefile
+            // project resolution that raw GetPropertyValue misses).
+
+            var buildParams = new BuildParameters();
+            if (_enableLogger)
             {
-                _externalIncludePaths = ResolveIncludePathEntries(
-                    externalIncludes.Split(';', StringSplitOptions.RemoveEmptyEntries)).ToArray();
+                buildParams.Loggers = new[] { new Microsoft.Build.Logging.ConsoleLogger(Microsoft.Build.Framework.LoggerVerbosity.Detailed) };
             }
 
-            // IncludePath is a project-level property that feeds the compiler's
-            // system include directories (like the INCLUDE env var). Projects such
-            // as SDL add source directories here instead of AdditionalIncludeDirectories.
-            // GetClCommandLines does not emit /I flags for these, so we inject them.
-            var includePath = projectInstance.GetPropertyValue("IncludePath");
-            if (!string.IsNullOrEmpty(includePath))
+            // Batch design-time targets into a single BuildRequestData:
+            //  - GetProjectDirectories provides authoritative IncludePath and ExternalIncludePath values,
+            //    including UseEnv and Makefile resolution that raw GetPropertyValue misses.
+            //  - ComputeReferenceCLInput resolves PublicIncludeDirectories from project references
+            //    and adds them to ClCompile.AdditionalIncludeDirectories before GetClCommandLines runs.
+            //  - ReplaceExistingProjectInstance prevents stale cached ProjectInstances
+            //    across --all-configurations iterations.
+            var buildRequestData = new BuildRequestData(
+                projectInstance,
+                new[] { "ComputeReferenceCLInput", "GetProjectDirectories", "GetClCommandLines" },
+                hostServices: null,
+                BuildRequestDataFlags.ReplaceExistingProjectInstance);
+            var buildResult = BuildManager.DefaultBuildManager.Build(buildParams, buildRequestData);
+
+            // Harvest GetProjectDirectories even on failure. It's a light target
+            // and often succeeds even when GetClCommandLines doesn't.
+            if (buildResult.ResultsByTarget.TryGetValue("GetProjectDirectories", out var projDirsResult)
+                && projDirsResult.Items.Length > 0)
             {
-                var externalSet = new HashSet<string>(
-                    _externalIncludePaths, StringComparer.OrdinalIgnoreCase);
-                _includePaths = ResolveIncludePathEntries(
-                    includePath.Split(';', StringSplitOptions.RemoveEmptyEntries))
-                    .Where(p => !externalSet.Contains(p))
-                    .ToArray();
+                var directoriesItem = projDirsResult.Items[0];
+                var externalIncludePath = directoriesItem.GetMetadata("ExternalIncludePath");
+                var includePath = directoriesItem.GetMetadata("IncludePath");
+
+                if (!string.IsNullOrEmpty(externalIncludePath))
+                {
+                    _externalIncludePaths = ResolveIncludePathEntries(
+                        externalIncludePath.Split(';', StringSplitOptions.RemoveEmptyEntries)).ToArray();
+                }
+                if (!string.IsNullOrEmpty(includePath))
+                {
+                    var externalSet = new HashSet<string>(_externalIncludePaths, StringComparer.OrdinalIgnoreCase);
+                    _includePaths = ResolveIncludePathEntries(
+                        includePath.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                        .Where(p => !externalSet.Contains(p))
+                        .ToArray();
+                }
             }
 
-            // Add VS auxiliary include paths (VC\Auxiliary\VS\include, VC\Auxiliary\VS\UnitTest\include)
-            // that come from $([MSBuild]::NormalizePath(...)) in IncludePath which can't be fully
-            // evaluated by GetPropertyValue due to nested $(MSBuildThisFileDirectory) references.
+            // Add VS auxiliary include paths from VCToolsInstallDir. The IncludePath
+            // property contains $([MSBuild]::NormalizePath(...)) calls that can't
+            // be fully evaluated, so these paths are appended explicitly here.
             var vcToolsDir = _vcToolsInstallDir ?? projectInstance.GetPropertyValue("VCToolsInstallDir")?.TrimEnd('\\');
             var allIncludes = new HashSet<string>(_externalIncludePaths.Concat(_includePaths), StringComparer.OrdinalIgnoreCase);
             var auxPaths = GetVsAuxiliaryIncludePaths(vcToolsDir)
@@ -250,16 +538,8 @@ namespace MSBuild.CompileCommands.Extractor
             if (auxPaths.Length > 0)
                 _includePaths = _includePaths.Concat(auxPaths).ToArray();
 
-            var buildParams = new BuildParameters();
-            if (_enableLogger)
-            {
-                buildParams.Loggers = new[] { new Microsoft.Build.Logging.ConsoleLogger(Microsoft.Build.Framework.LoggerVerbosity.Detailed) };
-            }
-
-            var buildRequestData = new BuildRequestData(projectInstance, new[] { "GetClCommandLines" });
-            var buildResult = BuildManager.DefaultBuildManager.Build(buildParams, buildRequestData);
-
-            if (buildResult.OverallResult != BuildResultCode.Success)
+            if (buildResult.OverallResult != BuildResultCode.Success
+                && !buildResult.ResultsByTarget.ContainsKey("GetClCommandLines"))
             {
                 // GN-generated projects may fail because the configuration doesn't match.
                 // Return empty list to trigger the ItemDefinitionGroup fallback.
@@ -269,18 +549,40 @@ namespace MSBuild.CompileCommands.Extractor
             }
 
             var entries = new List<ClCommandLineEntry>();
-            var targetResult = buildResult.ResultsByTarget["GetClCommandLines"];
+            if (!buildResult.ResultsByTarget.TryGetValue("GetClCommandLines", out var targetResult))
+                return entries;
 
             foreach (var item in targetResult.Items)
             {
+                var files = item.GetMetadata("Files")
+                    .Split(';', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(f => f.Trim())
+                    .ToArray();
+
+                var isConfigDefault = string.Equals(
+                    item.GetMetadata("ConfigurationOptions"), "true",
+                    StringComparison.OrdinalIgnoreCase);
+
+                // FxCompile (HLSL) heuristic: the CLCommandLine task runs once for @(ClCompile)
+                // and once for @(FxCompile), and both outputs land in the same @(ClCommandLines)
+                // item group with no discriminator metadata.
+                // Detect by file extensions: if every file in the Files list is an HLSL source,
+                // treat the entry as FxCompile.
+                var isFxCompile = files.Length > 0 && files.All(f =>
+                {
+                    var ext = Path.GetExtension(f);
+                    return string.Equals(ext, ".hlsl", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(ext, ".fx", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(ext, ".hlsli", StringComparison.OrdinalIgnoreCase);
+                });
+
                 entries.Add(new ClCommandLineEntry(
                     CommandLine: item.ItemSpec,
                     WorkingDirectory: item.GetMetadata("WorkingDirectory"),
                     ToolPath: item.GetMetadata("ToolPath"),
-                    Files: item.GetMetadata("Files")
-                        .Split(';', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray()
+                    Files: files,
+                    IsConfigurationDefault: isConfigDefault,
+                    IsFxCompile: isFxCompile
                 ));
             }
 
@@ -307,7 +609,7 @@ namespace MSBuild.CompileCommands.Extractor
                 bool anyHasValue = clCompileItems.Any(i => !string.IsNullOrEmpty(i.GetMetadataValue(key)));
                 if (!anyHasValue) continue;
 
-                // Some items have it, some don't — set empty string on items missing it
+                // Some items have it, some don't. Set empty string on items missing it
                 foreach (var item in clCompileItems)
                 {
                     if (string.IsNullOrEmpty(item.GetMetadataValue(key)))
@@ -496,10 +798,11 @@ namespace MSBuild.CompileCommands.Extractor
                     : Path.GetFullPath(Path.Combine(projectDir, file));
 
                 var fileArgs = new List<string>(baseArgs) { fullPath };
+                var commandLine = SanitizeFallbackPaths(fileArgs.ToArray(), _vcToolsInstallDir);
 
                 commands.Add(new CompileCommand(
                     File: fullPath,
-                    Arguments: fileArgs.ToArray(),
+                    Arguments: commandLine,
                     Directory: projectDir,
                     ProjectPath: _projectPath,
                     ProjectName: _projectName,
@@ -547,7 +850,7 @@ namespace MSBuild.CompileCommands.Extractor
             }
             else
             {
-                // No header hints — scan the project directory (non-recursive to avoid
+                // No header hints; scan the project directory (non-recursive to avoid
                 // pulling in huge trees for build-output directories)
                 try
                 {
@@ -601,9 +904,16 @@ namespace MSBuild.CompileCommands.Extractor
         private List<CompileCommand> ToCompileCommands(List<ClCommandLineEntry> entries)
         {
             var commands = new List<CompileCommand>();
+            string[]? defaultArgs = null;
 
             foreach (var entry in entries)
             {
+                // Drop FxCompile (HLSL) entries from standard compile_commands.json
+                // output. They carry fxc.exe flags, not cl.exe flags, and clangd
+                // cannot consume them. See ClCommandLineEntry.IsFxCompile.
+                if (entry.IsFxCompile)
+                    continue;
+
                 var toolPath = ResolveToolPath(entry.ToolPath);
                 var baseArgs = new List<string> { toolPath };
 
@@ -620,6 +930,14 @@ namespace MSBuild.CompileCommands.Extractor
                 // stops parsing and cascades into hundreds of false diagnostics.
                 baseArgs.Add("-ferror-limit=0");
 
+                // Add the GetClCommandLines output FIRST. It contains project-local
+                // include paths that must come before system/external includes to match
+                // the real build's resolution order.
+                baseArgs.AddRange(CommandLineTokenizer.TokenizeWithResponseFiles(entry.CommandLine, entry.WorkingDirectory));
+
+                // Then append IncludePath/ExternalIncludePath entries. These are
+                // system-level paths (SDK, toolchain) that GetClCommandLines doesn't
+                // emit but the compiler uses via the INCLUDE env var in real builds.
                 foreach (var includePath in _externalIncludePaths)
                 {
                     baseArgs.Add($"/I{includePath}");
@@ -629,9 +947,6 @@ namespace MSBuild.CompileCommands.Extractor
                 {
                     baseArgs.Add($"/I{includePath}");
                 }
-
-                baseArgs.AddRange(CommandLineTokenizer.TokenizeWithResponseFiles(
-                    entry.CommandLine, entry.WorkingDirectory));
 
                 // Merge two-arg /external:I flags into single token.
                 // MSBuild emits "/external:I" "<path>" as separate tokens but
@@ -660,11 +975,55 @@ namespace MSBuild.CompileCommands.Extractor
 
                 foreach (var file in entry.Files)
                 {
+                    bool isTemporaryCpp = string.Equals(Path.GetFileName(file), "__temporary.cpp", StringComparison.OrdinalIgnoreCase);
+
+                    if (isTemporaryCpp)
+                    {
+                        if (_emitDefaults)
+                        {
+                            // Emit with a synthetic filename so consumers can inspect
+                            // the project-wide baseline.
+                            var defaultsFile = Path.Combine(entry.WorkingDirectory, "__project_defaults.cpp");
+                            var defaultsArgs = new List<string>(baseArgs) { defaultsFile };
+                            var sanitized = SanitizeFallbackPaths(defaultsArgs.ToArray(), _vcToolsInstallDir);
+                            commands.Add(new CompileCommand(
+                                File: defaultsFile,
+                                Arguments: sanitized,
+                                Directory: entry.WorkingDirectory,
+                                ProjectPath: _projectPath,
+                                ProjectName: _projectName,
+                                Configuration: _configuration,
+                                Platform: _platform
+                            ));
+                        }
+                        if (_mergeDefaults)
+                        {
+                            // Capture the default args (without the source file) for
+                            // merging into per-file entries below.
+                            defaultArgs = baseArgs.ToArray();
+                        }
+                        continue;
+                    }
+
                     var fileArgs = new List<string>(baseArgs) { file };
+
+                    // Backfill flags from the project-wide default command line
+                    // that this per-file entry doesn't already carry.
+                    // Per-file entries omit anything inherited unchanged from ItemDefinitionGroup,
+                    // typically defines, language standard, and warning level.
+                    // Without this merge, clangd would see a partial command
+                    // and miss most of the project's compilation context.
+                    // The defaults come from the ConfigurationOptions=true entry,
+                    // captured above when --merge-defaults is active.
+                    if (_mergeDefaults && defaultArgs != null)
+                        MergeDefaultFlags(fileArgs, defaultArgs);
+
+                    // Resolve any remaining unresolved fallback paths in the arguments
+                    var commandLine = SanitizeFallbackPaths(fileArgs.ToArray(), _vcToolsInstallDir);
 
                     commands.Add(new CompileCommand(
                         File: file,
-                        Arguments: fileArgs.ToArray(),
+                        Arguments: commandLine,
                         Directory: entry.WorkingDirectory,
                         ProjectPath: _projectPath,
                         ProjectName: _projectName,
@@ -709,7 +1068,8 @@ namespace MSBuild.CompileCommands.Extractor
 
         public static List<CompileCommand> ExtractCompileCommandsFromSolution(
             string solutionPath, string configuration = "Debug", string platform = "x64",
-            bool enableLogger = false, string? vcToolsInstallDir = null)
+            bool enableLogger = false, string? vcToolsInstallDir = null,
+            bool emitDefaults = false, bool mergeDefaults = false)
         {
             var solutionDir = Path.GetDirectoryName(Path.GetFullPath(solutionPath))!;
             var projects = ProjectDiscovery.GetVcProjectsFromSolution(solutionPath);
@@ -720,7 +1080,8 @@ namespace MSBuild.CompileCommands.Extractor
                 try
                 {
                     var extractor = new InProcessExtractor(
-                        project.Path, configuration, platform, enableLogger, solutionDir, vcToolsInstallDir);
+                        project.Path, configuration, platform, enableLogger, solutionDir, vcToolsInstallDir,
+                        emitDefaults, mergeDefaults);
                     allCommands.AddRange(extractor.ExtractCompileCommands());
                 }
                 catch (Exception ex)

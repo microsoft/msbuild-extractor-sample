@@ -122,6 +122,8 @@ Options:
   --format <standard|rich>          Output format [default: standard]
   --validate                        Verify each entry compiles with cl.exe
   --strict                          Treat config/platform warnings as errors
+  --emit-defaults                   Include the project-wide default compile entry in the output
+  --merge-defaults                  Merge project-wide default switches into each per-file entry
   --vs-path <path>                  Path to Visual Studio installation
   --vs-instance <id>                Select VS by instance ID (see --list-instances)
   --list-instances                  List all Visual Studio installations and exit
@@ -156,7 +158,8 @@ dotnet build
 - **C++20 modules** (`.ixx`/`.cppm`) are extracted but skipped during `--validate` (require `/interface` flag)
 - **NuGet native packages** must be restored before extraction (`nuget restore` or `msbuild -t:Restore`)
 - **Build-generated files** (MIDL proxies, code generators) won't exist until a full build is done
-- Windows-only - requires Visual Studio and MSVC toolchain
+- **Precompiled headers** are stripped during `--validate` because PCH files require exact flag matching with the original build. Files that depend on PCH for include ordering or platform abstractions (e.g., `stdafx.h` pulling in Windows headers) may fail validation even though the extracted compile command is correct for IntelliSense
+- Windows-only, requires Visual Studio and MSVC toolchain
 
 ## License
 

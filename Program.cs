@@ -90,7 +90,7 @@ namespace MSBuild.CompileCommands.Extractor
                 }
             }
 
-            // Register MSBuild early — needed for SolutionFile.Parse() in validation
+            // Register MSBuild early, needed for SolutionFile.Parse() in validation
             // and for in-process extraction. Out-of-process mode also needs it for
             // solution parsing even though extraction uses a separate MSBuild process.
             bool isOutOfProcess = options.MsBuildPath != null;
@@ -147,10 +147,10 @@ namespace MSBuild.CompileCommands.Extractor
                 if (options.EmitCCppProperties)
                 {
                     var baseDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
-                    RichDatabase.GenerateCCppProperties(outputPath, options.Platform, baseDir);
+                    VsCodeSettings.GenerateCCppProperties(outputPath, options.Platform, baseDir);
                 }
                 if (options.Validate)
-                    RunValidation(commands);
+                    ClExeValidator.Run(commands);
             }
         }
 
@@ -272,7 +272,7 @@ namespace MSBuild.CompileCommands.Extractor
                 if (options.EmitCCppProperties)
                 {
                     var baseDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
-                    RichDatabase.GenerateCCppProperties(outputPath, options.Platform, baseDir);
+                    VsCodeSettings.GenerateCCppProperties(outputPath, options.Platform, baseDir);
                 }
             }
         }
@@ -309,13 +309,15 @@ namespace MSBuild.CompileCommands.Extractor
             {
                 return InProcessExtractor.ExtractCompileCommandsFromSolution(
                     options.Solution, options.Configuration, options.Platform,
-                    options.EnableLogger, options.VcToolsInstallDir);
+                    options.EnableLogger, options.VcToolsInstallDir,
+                    options.EmitDefaults, options.MergeDefaults);
             }
             else
             {
                 var extractor = new InProcessExtractor(
                     options.Projects[0], options.Configuration, options.Platform,
-                    options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir);
+                    options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir,
+                    options.EmitDefaults, options.MergeDefaults);
                 return extractor.ExtractCompileCommands();
             }
         }
@@ -326,7 +328,8 @@ namespace MSBuild.CompileCommands.Extractor
             {
                 return OutOfProcessExtractor.ExtractCompileCommandsFromSolution(
                     options.MsBuildPath!, options.Solution, options.Configuration, options.Platform,
-                    options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath);
+                    options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath,
+                    emitDefaults: options.EmitDefaults, mergeDefaults: options.MergeDefaults);
             }
             else
             {
@@ -337,7 +340,9 @@ namespace MSBuild.CompileCommands.Extractor
                     msbuildProperties: options.MsBuildProperties,
                     msbuildEnv: options.MsBuildEnv,
                     launcher: ParseLauncher(options.MsBuildLauncher),
-                    includePathOrder: ParseIncludePathOrder(options.IncludePathOrder));
+                    includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
+                    emitDefaults: options.EmitDefaults,
+                    mergeDefaults: options.MergeDefaults);
                 return extractor.ExtractCompileCommands();
             }
         }
@@ -360,11 +365,14 @@ namespace MSBuild.CompileCommands.Extractor
                             msbuildProperties: options.MsBuildProperties,
                             msbuildEnv: options.MsBuildEnv,
                             launcher: ParseLauncher(options.MsBuildLauncher),
-                            includePathOrder: ParseIncludePathOrder(options.IncludePathOrder));
+                            includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
+                            emitDefaults: options.EmitDefaults,
+                            mergeDefaults: options.MergeDefaults);
                     else
                         commands = InProcessExtractor.ExtractCompileCommandsFromSolution(
                             sln, options.Configuration, options.Platform,
-                            options.EnableLogger, options.VcToolsInstallDir);
+                            options.EnableLogger, options.VcToolsInstallDir,
+                            options.EmitDefaults, options.MergeDefaults);
                     Console.WriteLine($"  Got {commands.Count} entries");
                     allCommands.AddRange(commands);
                 }
@@ -389,14 +397,17 @@ namespace MSBuild.CompileCommands.Extractor
                             msbuildProperties: options.MsBuildProperties,
                             msbuildEnv: options.MsBuildEnv,
                             launcher: ParseLauncher(options.MsBuildLauncher),
-                            includePathOrder: ParseIncludePathOrder(options.IncludePathOrder));
+                            includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
+                            emitDefaults: options.EmitDefaults,
+                            mergeDefaults: options.MergeDefaults);
                         commands = extractor.ExtractCompileCommands();
                     }
                     else
                     {
                         var extractor = new InProcessExtractor(
                             proj, options.Configuration, options.Platform,
-                            options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir);
+                            options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir,
+                            options.EmitDefaults, options.MergeDefaults);
                         commands = extractor.ExtractCompileCommands();
                     }
                     Console.WriteLine($"  Got {commands.Count} entries");
@@ -484,190 +495,6 @@ namespace MSBuild.CompileCommands.Extractor
             var dir = Path.GetDirectoryName(Path.GetFullPath(inputPath))!;
             var filename = options.Format == "rich" ? "compile_database.json" : "compile_commands.json";
             return Path.Combine(dir, filename);
-        }
-
-        static void RunValidation(List<CompileCommand> commands)
-        {
-            Console.WriteLine();
-            Console.WriteLine($"Validating {commands.Count} compile commands with cl.exe...");
-
-            int passed = 0, failed = 0, skipped = 0;
-            var failures = new List<(string File, int ExitCode, string Error)>();
-
-            foreach (var cmd in commands)
-            {
-                var fileName = Path.GetFileName(cmd.File);
-                var ext = Path.GetExtension(cmd.File).ToLowerInvariant();
-
-                // Skip C++20 module files — they need /interface flag
-                if (ext is ".ixx" or ".cppm")
-                {
-                    skipped++;
-                    continue;
-                }
-
-                Console.Write($"\r  [{passed + failed + skipped}/{commands.Count}] {fileName,-50}");
-
-                var args = new List<string>(cmd.Arguments);
-
-                // Ensure /c is present
-                if (!args.Any(a => a.Equals("/c", StringComparison.OrdinalIgnoreCase)))
-                    args.Insert(1, "/c");
-
-                // Replace /Fo with /FoNUL to discard .obj output
-                for (int i = 0; i < args.Count; i++)
-                {
-                    if (args[i].StartsWith("/Fo", StringComparison.OrdinalIgnoreCase) &&
-                        !args[i].StartsWith("/Fp", StringComparison.OrdinalIgnoreCase))
-                        args[i] = "/FoNUL";
-                }
-
-                // Remove /Fd (PDB) to avoid file locking
-                args.RemoveAll(a => a.StartsWith("/Fd", StringComparison.OrdinalIgnoreCase));
-
-                // Remove precompiled header flags — PCH files won't exist without a full build
-                args.RemoveAll(a => a.StartsWith("/Yu", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/Yc", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/Fp", StringComparison.OrdinalIgnoreCase));
-
-                // Remove warning-related flags and add /w at the end to suppress all warnings
-                // This prevents /WX (warnings-as-errors) from causing false failures
-                // Convert /external:I paths to regular /I (they're still needed for compilation)
-                for (int i = args.Count - 1; i >= 0; i--)
-                {
-                    var a = args[i];
-                    if (a.Equals("/external:I", StringComparison.OrdinalIgnoreCase))
-                    {
-                        // Two-arg form: convert /external:I <path> → /I <path>
-                        args[i] = "/I";
-                    }
-                    else if (a.StartsWith("/external:I", StringComparison.OrdinalIgnoreCase) &&
-                             a.Length > "/external:I".Length)
-                    {
-                        // Concatenated form: /external:IC:/path → /IC:/path
-                        args[i] = "/I" + a["/external:I".Length..];
-                    }
-                    else if (a.Equals("/external:W0", StringComparison.OrdinalIgnoreCase) ||
-                             a.Equals("/external:W1", StringComparison.OrdinalIgnoreCase) ||
-                             a.Equals("/external:W2", StringComparison.OrdinalIgnoreCase) ||
-                             a.Equals("/external:W3", StringComparison.OrdinalIgnoreCase) ||
-                             a.Equals("/external:W4", StringComparison.OrdinalIgnoreCase))
-                    {
-                        args.RemoveAt(i);
-                    }
-                }
-                args.RemoveAll(a => a.Equals("/WX", StringComparison.OrdinalIgnoreCase) ||
-                                    a.Equals("/WX-", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/W", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/w1", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/w2", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/w3", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/w4", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/wd", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/we", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/experimental:external", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("/analyze", StringComparison.OrdinalIgnoreCase));
-                args.Add("/w");
-
-                // Remove clang-specific flags that cl.exe doesn't understand
-                args.RemoveAll(a => a.StartsWith("-ferror-limit", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("--target=", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("-fms-compatibility", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("-fdelayed-template", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("-Wno-", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("-W", StringComparison.OrdinalIgnoreCase) && !a.StartsWith("/W", StringComparison.OrdinalIgnoreCase));
-
-                try
-                {
-                    var startInfo = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = args[0],
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        WorkingDirectory = cmd.Directory
-                    };
-
-                    foreach (var arg in args.Skip(1))
-                        startInfo.ArgumentList.Add(arg);
-
-                    using var process = System.Diagnostics.Process.Start(startInfo);
-                    if (process == null)
-                    {
-                        failed++;
-                        failures.Add((fileName, -1, "Failed to start cl.exe"));
-                        continue;
-                    }
-
-                    var stdoutTask = process.StandardOutput.ReadToEndAsync();
-                    var stderrTask = process.StandardError.ReadToEndAsync();
-
-                    if (!process.WaitForExit(60000))
-                    {
-                        try { process.Kill(true); } catch { }
-                        failed++;
-                        failures.Add((fileName, -1, "TIMEOUT (60s)"));
-                        continue;
-                    }
-
-                    var stdout = stdoutTask.Result;
-                    var stderr = stderrTask.Result;
-
-                    if (process.ExitCode == 0)
-                    {
-                        passed++;
-                    }
-                    else
-                    {
-                        failed++;
-                        // cl.exe writes compilation errors to stdout, banner to stderr
-                        var allOutput = stdout + "\n" + stderr;
-                        var errorLine = (allOutput.Split('\n')
-                            .FirstOrDefault(l => l.Contains("error C", StringComparison.OrdinalIgnoreCase)
-                                              || l.Contains("fatal error", StringComparison.OrdinalIgnoreCase))
-                            ?? allOutput.Split('\n').FirstOrDefault(l => l.Contains("error", StringComparison.OrdinalIgnoreCase))
-                            ?? "unknown error").Trim();
-                        failures.Add((fileName, process.ExitCode, errorLine[..Math.Min(120, errorLine.Length)]));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    failed++;
-                    failures.Add((fileName, -1, ex.Message[..Math.Min(120, ex.Message.Length)]));
-
-                    if (passed + failed == 1 && ex is System.ComponentModel.Win32Exception)
-                    {
-                        Console.WriteLine();
-                        Console.Error.WriteLine("Error: cl.exe not found. Run from a Developer Command Prompt or ensure cl.exe is in PATH.");
-                        return;
-                    }
-                }
-            }
-
-            Console.Write($"\r{new string(' ', 70)}\r");
-            Console.WriteLine();
-            Console.WriteLine(new string('=', 60));
-            Console.WriteLine($"VALIDATION: {passed} passed, {failed} failed, {skipped} skipped out of {commands.Count}");
-            Console.WriteLine(new string('=', 60));
-
-            if (skipped > 0)
-                Console.WriteLine($"  Skipped {skipped} module file(s) (.ixx/.cppm)");
-
-            if (failures.Count > 0)
-            {
-                Console.WriteLine();
-                Console.WriteLine("Failed:");
-                foreach (var (file, exitCode, error) in failures.Take(20))
-                    Console.WriteLine($"  [{exitCode}] {file}: {error}");
-                if (failures.Count > 20)
-                    Console.WriteLine($"  ... and {failures.Count - 20} more");
-            }
-            else if (failed == 0)
-            {
-                Console.WriteLine();
-                Console.WriteLine("All files compiled successfully!");
-            }
         }
 
         static void RegisterMSBuild(string? vsPath, bool enableLogger = false)

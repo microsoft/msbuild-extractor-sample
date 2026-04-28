@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 namespace MSBuild.CompileCommands.Extractor
 {
     /// <summary>
-    /// Rich compile database format — a hierarchical alternative to compile_commands.json.
+    /// Rich compile database format, a hierarchical alternative to compile_commands.json.
     /// Organizes compile commands by solution → project → configuration → file,
     /// with structured fields for includes, defines, and language standard.
     /// </summary>
@@ -187,11 +187,11 @@ namespace MSBuild.CompileCommands.Extractor
             {
                 var arg = args[i];
 
-                // Source file — skip
+                // Source file, skip
                 if (IsSourceFile(arg, cmd.File))
                     continue;
 
-                // /I<path> or /I <path> — user include
+                // /I<path> or /I <path>, user include
                 if (arg.StartsWith("/I", StringComparison.OrdinalIgnoreCase) ||
                     arg.StartsWith("-I", StringComparison.OrdinalIgnoreCase))
                 {
@@ -203,7 +203,7 @@ namespace MSBuild.CompileCommands.Extractor
                     continue;
                 }
 
-                // /external:I<path> — system/external include
+                // /external:I<path>, system/external include
                 if (arg.StartsWith("/external:I", StringComparison.OrdinalIgnoreCase))
                 {
                     var path = arg["/external:I".Length..];
@@ -231,7 +231,7 @@ namespace MSBuild.CompileCommands.Extractor
                     continue;
                 }
 
-                // /c — compile only, skip (it's implicit)
+                // /c, compile only, skip (it's implicit)
                 if (arg.Equals("/c", StringComparison.OrdinalIgnoreCase))
                     continue;
 
@@ -348,72 +348,6 @@ namespace MSBuild.CompileCommands.Extractor
                 SchemaVersion: SchemaVersion,
                 Checksum: checksum
             );
-        }
-
-        /// <summary>
-        /// Generate a .vscode/c_cpp_properties.json that references the compile_commands.json.
-        /// </summary>
-        public static void GenerateCCppProperties(string compileCommandsPath, string platform, string baseDir)
-        {
-            var vsCodeDir = Path.Combine(baseDir, ".vscode");
-            Directory.CreateDirectory(vsCodeDir);
-
-            var propsPath = Path.Combine(vsCodeDir, "c_cpp_properties.json");
-
-            if (File.Exists(propsPath))
-            {
-                Console.WriteLine($"Warning: {propsPath} already exists, overwriting");
-            }
-
-            // Make compileCommands path relative using ${workspaceFolder} if possible
-            string compileCommandsRef;
-            var fullCcPath = Path.GetFullPath(compileCommandsPath);
-            var fullBaseDir = Path.GetFullPath(baseDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            if (fullCcPath.StartsWith(fullBaseDir, StringComparison.OrdinalIgnoreCase))
-                compileCommandsRef = "${workspaceFolder}/" + fullCcPath[fullBaseDir.Length..].Replace('\\', '/');
-            else
-                compileCommandsRef = fullCcPath.Replace('\\', '/');
-
-            var intelliSenseMode = platform.ToLowerInvariant() switch
-            {
-                "x64" => "msvc-x64",
-                "win32" or "x86" => "msvc-x86",
-                "arm64" or "arm64ec" => "msvc-arm64",
-                "arm" => "msvc-arm",
-                _ => "msvc-x64"
-            };
-
-            var configName = platform.ToLowerInvariant() switch
-            {
-                "x64" => "MSVC x64",
-                "win32" or "x86" => "MSVC x86",
-                "arm64" => "MSVC ARM64",
-                "arm" => "MSVC ARM",
-                _ => "MSVC"
-            };
-
-            var config = new
-            {
-                configurations = new[]
-                {
-                    new
-                    {
-                        name = configName,
-                        compileCommands = compileCommandsRef,
-                        intelliSenseMode = intelliSenseMode
-                    }
-                },
-                version = 4
-            };
-
-            var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
-
-            File.WriteAllText(propsPath, json);
-            Console.WriteLine($"Wrote {propsPath}");
         }
 
         /// <summary>

@@ -8,23 +8,16 @@ namespace MSBuild.CompileCommands.Extractor
     {
         private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
 
-        // Language standard ranking — higher index = newer standard
-        private static readonly string[] CppStandardRank =
-            ["c++14", "c++17", "c++20", "c++23", "c++latest"];
-        private static readonly string[] CStandardRank =
-            ["c11", "c17", "clatest"];
+        // Language standard ranking, higher index = newer standard
+        private static readonly string[] CppStandardRank = ["c++14", "c++17", "c++20", "c++23", "c++latest"];
+        private static readonly string[] CStandardRank = ["c11", "c17", "clatest"];
 
         /// <summary>
         /// Deduplicate compile commands so there is at most one entry per source file.
         /// </summary>
-        public static List<CompileCommand> Deduplicate(
-            List<CompileCommand> commands,
-            string preferConfig = "Debug",
-            string preferPlatform = "x64")
+        public static List<CompileCommand> Deduplicate(List<CompileCommand> commands, string preferConfig = "Debug", string preferPlatform = "x64")
         {
-            var groups = commands
-                .GroupBy(c => c.File, PathComparer)
-                .ToList();
+            var groups = commands.GroupBy(c => c.File, PathComparer).ToList();
 
             var result = new List<CompileCommand>(groups.Count);
 
@@ -33,7 +26,7 @@ namespace MSBuild.CompileCommands.Extractor
                 var entries = group.ToList();
                 if (entries.Count == 1)
                 {
-                    // Single entry — still strip warnings/optimization flags
+                    // Single entry, still strip warnings/optimization flags
                     var cleaned = CleanSingleEntry(entries[0]);
                     result.Add(cleaned);
                 }
@@ -54,10 +47,7 @@ namespace MSBuild.CompileCommands.Extractor
             return entry with { Arguments = args.ToArray() };
         }
 
-        private static CompileCommand MergeEntries(
-            List<CompileCommand> entries,
-            string preferConfig,
-            string preferPlatform)
+        private static CompileCommand MergeEntries(List<CompileCommand> entries, string preferConfig, string preferPlatform)
         {
             // Sort entries so preferred config/platform comes first
             var sorted = entries
@@ -69,34 +59,28 @@ namespace MSBuild.CompileCommands.Extractor
             // Parse arguments from all entries
             var parsedAll = sorted.Select(ParseArguments).ToList();
 
-            // 1. cl.exe path — from preferred entry
+            // The cl.exe path and source file come from the preferred entry;
+            // the source file is identical across every entry in the group,
+            // since that's the grouping key.
             string clExe = parsedAll[0].ClExe;
-
-            // 2. Source file — same across all (that's why they're grouped)
             string sourceFile = parsedAll[0].SourceFile ?? preferred.File;
 
-            // 3. Include paths — union, order-preserving, case-insensitive dedup
-            var includes = UnionOrderPreserving(
-                parsedAll.SelectMany(p => p.IncludePaths),
-                PathComparer);
+            // Include paths are unioned with case-insensitive, order-preserving dedup.
+            var includes = UnionOrderPreserving(parsedAll.SelectMany(p => p.IncludePaths), PathComparer);
 
-            // 4. Defines — smart merge
+            // Defines need a smart merge to handle conflicting values across entries.
             var defines = MergeDefines(parsedAll.Select(p => p.Defines).ToList());
 
-            // 5. Language standard — keep highest
-            string? langStd = PickHighestStandard(
-                parsedAll.Select(p => p.LanguageStandard).Where(s => s != null).Cast<string>());
+            // For language standard, keep the highest seen across the group.
+            string? langStd = PickHighestStandard(parsedAll.Select(p => p.LanguageStandard).Where(s => s != null).Cast<string>());
 
-            // 6. Runtime library — prefer debug variant
-            string? runtimeLib = PickDebugRuntime(
-                parsedAll.Select(p => p.RuntimeLibrary).Where(s => s != null).Cast<string>());
+            // For the runtime library, prefer the debug variant when present.
+            string? runtimeLib = PickDebugRuntime(parsedAll.Select(p => p.RuntimeLibrary).Where(s => s != null).Cast<string>());
 
-            // 7. Other flags — union (permissive)
-            var otherFlags = UnionOrderPreserving(
-                parsedAll.SelectMany(p => p.OtherFlags),
-                StringComparer.OrdinalIgnoreCase);
+            // Remaining flags are unioned permissively.
+            var otherFlags = UnionOrderPreserving(parsedAll.SelectMany(p => p.OtherFlags), StringComparer.OrdinalIgnoreCase);
 
-            // 8. Directory — from first/preferred entry
+            // The working directory comes from the preferred entry.
             string directory = preferred.Directory;
 
             // Reconstruct arguments
@@ -286,7 +270,7 @@ namespace MSBuild.CompileCommands.Extractor
 
             foreach (var name in allNames)
             {
-                // Skip _DEBUG and NDEBUG — we'll add _DEBUG at the end
+                // Skip _DEBUG and NDEBUG, we'll add _DEBUG at the end
                 if (name.Equals("_DEBUG", StringComparison.OrdinalIgnoreCase) ||
                     name.Equals("NDEBUG", StringComparison.OrdinalIgnoreCase))
                 {
@@ -314,7 +298,7 @@ namespace MSBuild.CompileCommands.Extractor
                 }
                 else
                 {
-                    // Conflict — keep define (first non-null value, permissive)
+                    // Conflict: keep define (first non-null value, permissive)
                     var firstValue = values.FirstOrDefault(v => v != null) ?? values[0];
                     result.Add(FormatDefine(name, firstValue));
                 }

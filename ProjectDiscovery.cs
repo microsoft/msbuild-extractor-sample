@@ -161,7 +161,7 @@ namespace MSBuild.CompileCommands.Extractor
         {
             var configs = knownConfigs ?? GetProjectConfigurations(projectPath);
             if (configs.Length == 0)
-                return null; // Cannot validate — no configs found in project
+                return null; // Cannot validate, no configs found in project
 
             var match = configs.Any(cp =>
                 cp.Configuration.Equals(configuration, StringComparison.OrdinalIgnoreCase) &&

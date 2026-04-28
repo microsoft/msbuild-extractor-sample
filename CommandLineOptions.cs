@@ -7,7 +7,6 @@ namespace MSBuild.CompileCommands.Extractor
         public string[] Projects { get; set; } = [];
         public string[] Solutions { get; set; } = [];
 
-        // Convenience accessors for single-input backward compatibility
         public string? Project => Projects.Length == 1 ? Projects[0] : null;
         public string? Solution => Solutions.Length == 1 ? Solutions[0] : null;
         public string Configuration { get; set; } = "Debug";
@@ -32,6 +31,8 @@ namespace MSBuild.CompileCommands.Extractor
         public bool ListInstances { get; set; }
         public string? VsInstance { get; set; }
         public bool EmitCCppProperties { get; set; }
+        public bool EmitDefaults { get; set; }
+        public bool MergeDefaults { get; set; }
         public Dictionary<string, string> MsBuildProperties { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> MsBuildEnv { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public string MsBuildLauncher { get; set; } = "auto";
@@ -177,6 +178,18 @@ namespace MSBuild.CompileCommands.Extractor
                 DefaultValueFactory = _ => false
             };
 
+            var emitDefaultsOption = new Option<bool>("--emit-defaults")
+            {
+                Description = "Include the project-wide default compile entry in the output (synthetic __project_defaults.cpp with the baseline switches for the project)",
+                DefaultValueFactory = _ => false
+            };
+
+            var mergeDefaultsOption = new Option<bool>("--merge-defaults")
+            {
+                Description = "Merge project-wide default switches (defines, language standard, warning level, etc.) into each per-file entry when they are not already present",
+                DefaultValueFactory = _ => false
+            };
+
             var msbuildPropertyOption = new Option<string[]>("--msbuild-property")
             {
                 Description = "Pass an MSBuild global property as KEY=VALUE (repeatable). Overrides built-in defaults (e.g. BuildProjectReferences=true).",
@@ -228,6 +241,8 @@ namespace MSBuild.CompileCommands.Extractor
             rootCommand.Options.Add(listInstancesOption);
             rootCommand.Options.Add(vsInstanceOption);
             rootCommand.Options.Add(cCppPropertiesOption);
+            rootCommand.Options.Add(emitDefaultsOption);
+            rootCommand.Options.Add(mergeDefaultsOption);
             rootCommand.Options.Add(msbuildPropertyOption);
             rootCommand.Options.Add(msbuildEnvOption);
             rootCommand.Options.Add(msbuildLauncherOption);
@@ -277,6 +292,8 @@ namespace MSBuild.CompileCommands.Extractor
                     ListInstances = parseResult.GetValue(listInstancesOption),
                     VsInstance = parseResult.GetValue(vsInstanceOption),
                     EmitCCppProperties = parseResult.GetValue(cCppPropertiesOption),
+                    EmitDefaults = parseResult.GetValue(emitDefaultsOption),
+                    MergeDefaults = parseResult.GetValue(mergeDefaultsOption),
                     MsBuildProperties = ParseKeyValuePairs(parseResult.GetValue(msbuildPropertyOption), "--msbuild-property"),
                     MsBuildEnv = ParseKeyValuePairs(parseResult.GetValue(msbuildEnvOption), "--msbuild-env"),
                     MsBuildLauncher = parseResult.GetValue(msbuildLauncherOption)!,
@@ -296,12 +313,12 @@ namespace MSBuild.CompileCommands.Extractor
         {
             var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (values == null) return dict;
-            foreach (var v in values)
+            foreach (var entry in values)
             {
-                var eq = v.IndexOf('=');
-                if (eq <= 0)
-                    throw new ArgumentException($"{flagName} value '{v}' must be in KEY=VALUE form.");
-                dict[v.Substring(0, eq)] = v.Substring(eq + 1);
+                var separatorIndex = entry.IndexOf('=');
+                if (separatorIndex <= 0)
+                    throw new ArgumentException($"{flagName} value '{entry}' must be in KEY=VALUE form.");
+                dict[entry.Substring(0, separatorIndex)] = entry.Substring(separatorIndex + 1);
             }
             return dict;
         }

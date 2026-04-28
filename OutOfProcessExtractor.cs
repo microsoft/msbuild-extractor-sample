@@ -23,6 +23,8 @@ namespace MSBuild.CompileCommands.Extractor
         private readonly IReadOnlyDictionary<string, string> _userEnv;
         private readonly MsBuildLauncher _launcher;
         private readonly IncludePathOrder _includePathOrder;
+        private readonly bool _emitDefaults;
+        private readonly bool _mergeDefaults;
 
         public OutOfProcessExtractor(
             string msbuildPath,
@@ -37,7 +39,9 @@ namespace MSBuild.CompileCommands.Extractor
             IReadOnlyDictionary<string, string>? msbuildProperties = null,
             IReadOnlyDictionary<string, string>? msbuildEnv = null,
             MsBuildLauncher launcher = MsBuildLauncher.Auto,
-            IncludePathOrder includePathOrder = IncludePathOrder.Auto)
+            IncludePathOrder includePathOrder = IncludePathOrder.Auto,
+            bool emitDefaults = false,
+            bool mergeDefaults = false)
         {
             _msbuildPath = msbuildPath;
             _projectPath = Path.GetFullPath(projectPath);
@@ -54,12 +58,14 @@ namespace MSBuild.CompileCommands.Extractor
             _userEnv = msbuildEnv ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             _launcher = launcher;
             _includePathOrder = includePathOrder;
+            _emitDefaults = emitDefaults;
+            _mergeDefaults = mergeDefaults;
 
             if (!File.Exists(_msbuildPath))
                 throw new FileNotFoundException($"MSBuild not found: {_msbuildPath}");
             if (_msbuildPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
             {
-                // MSBuild.dll from a .NET SDK can't be launched directly — use dotnet exec
+                // MSBuild.dll from a .NET SDK can't be launched directly, use dotnet exec
                 var dotnetPath = FindDotnetExe();
                 if (dotnetPath == null)
                     throw new FileNotFoundException(
@@ -75,10 +81,26 @@ namespace MSBuild.CompileCommands.Extractor
         private string[] _externalIncludePaths = [];
         private string[] _includePaths = [];
 
+        private static readonly char[] CmdMetaChars =
+            { ' ', '\t', ';', '&', '|', '^', '<', '>', '(', ')' };
+
+        /// <summary>
+        /// Quotes a command-line argument for cmd.exe. Handles whitespace, cmd
+        /// metacharacters (; &amp; | ^ &lt; &gt; ( )), and trailing backslashes
+        /// that would otherwise escape the closing quote.
+        /// </summary>
+        private static string QuoteCmdArg(string arg)
+        {
+            if (arg.StartsWith('"') && arg.EndsWith('"')) return arg;
+            if (arg.IndexOfAny(CmdMetaChars) < 0) return arg;
+            int trailingBackslashes = 0;
+            for (int i = arg.Length - 1; i >= 0 && arg[i] == '\\'; i--) trailingBackslashes++;
+            return "\"" + arg + new string('\\', trailingBackslashes) + "\"";
+        }
+
         private static string? TryResolveMsBuildExpression(string expr)
         {
-            var match = Regex.Match(expr,
-                @"\$\(\[MSBuild\]::NormalizePath\('([^']+)'(?:.*?)(?:\)\))?(.*)$");
+            var match = Regex.Match(expr, @"\$\(\[MSBuild\]::NormalizePath\('([^']+)'(?:.*?)(?:\)\))?(.*)$");
             if (match.Success)
             {
                 var basePath = match.Groups[1].Value;
@@ -96,19 +118,19 @@ namespace MSBuild.CompileCommands.Extractor
 
         private static IEnumerable<string> ResolveIncludePathEntries(IEnumerable<string> entries)
         {
-            foreach (var p in entries)
+            foreach (var entry in entries)
             {
-                if (string.IsNullOrWhiteSpace(p)) continue;
-                if (!p.StartsWith("$("))
+                if (string.IsNullOrWhiteSpace(entry)) continue;
+                if (!entry.StartsWith("$("))
                 {
                     string resolved;
-                    try { resolved = Uri.UnescapeDataString(p.Trim()); } catch { resolved = p.Trim(); }
+                    try { resolved = Uri.UnescapeDataString(entry.Trim()); } catch { resolved = entry.Trim(); }
                     if (!string.IsNullOrEmpty(resolved))
                         yield return resolved;
                 }
                 else
                 {
-                    var resolved = TryResolveMsBuildExpression(p);
+                    var resolved = TryResolveMsBuildExpression(entry);
                     if (resolved != null)
                         yield return resolved;
                 }
@@ -210,12 +232,11 @@ namespace MSBuild.CompileCommands.Extractor
                 new("Configuration", _configuration),
                 new("Platform", _platform),
                 new("DesignTimeBuild", "true"),
-                new("BuildingInsideVisualStudio", "true")
-                // Note: BuildProjectReferences is intentionally not set here. MSBuild's
-                // default is true (build dependencies to materialize outputs). VS sets
-                // it to false for design-time builds to avoid invoking the CL task on
-                // referenced projects; callers that want that behavior should pass
-                // --msbuild-property BuildProjectReferences=false.
+                new("BuildingInsideVisualStudio", "true"),
+                // Design-time builds should not build referenced projects.
+                new("BuildProjectReferences", "false"),
+                // Stable locale for MSBuild error strings.
+                new("LangID", "1033")
             };
 
             // Pass MicrosoftBuildCppTasksCommonPath if VCTargetsPath is set (needed for custom MSBuild environments)
@@ -239,7 +260,25 @@ namespace MSBuild.CompileCommands.Extractor
                     : _vcToolsInstallDir.Replace(@"\\", @"\");
                 dir = dir.EndsWith('\\') ? dir : dir + "\\";
                 properties.Add(new("VCToolsInstallDir", dir));
+
+                // Derive VCInstallDir from VCToolsInstallDir (3 levels up)
+                // to prevent unresolved fallback values in repo props files.
+                try
+                {
+                    var vcInstallDir = Path.GetFullPath(Path.Combine(dir, "..", "..", ".."));
+                    if (Directory.Exists(vcInstallDir))
+                    {
+                        var vcNorm = vcInstallDir.EndsWith('\\') ? vcInstallDir : vcInstallDir + "\\";
+                        properties.Add(new("VCInstallDir", vcNorm));
+                    }
+                }
+                catch { }
             }
+
+            // Detect and set NETFXKitsDir to prevent unresolved fallback values
+            var netfxKitsDir = InProcessExtractor.FindNETFXKitsDir();
+            if (netfxKitsDir != null && !properties.Any(p => p.Key.Equals("NETFXKitsDir", StringComparison.OrdinalIgnoreCase)))
+                properties.Add(new("NETFXKitsDir", netfxKitsDir));
 
             // Apply user-supplied --msbuild-property overrides last so they win over our defaults.
             foreach (var kv in _userProperties)
@@ -248,7 +287,7 @@ namespace MSBuild.CompileCommands.Extractor
                 properties.Add(new(kv.Key, kv.Value));
             }
 
-            // Don't set WindowsTargetPlatformVersion as a global property — it would
+            // Don't set WindowsTargetPlatformVersion as a global property. It would
             // override projects with explicit full versions (e.g. 10.0.19041.0).
             // Instead, set as environment variable which has lower precedence in MSBuild.
             var latestSdk = VsWhereHelper.FindLatestWindowsSdkVersion();
@@ -312,7 +351,12 @@ namespace MSBuild.CompileCommands.Extractor
 
             var msbuildArgs = new List<string>();
             msbuildArgs.Add(_projectPath);
-            msbuildArgs.Add("/t:GetClCommandLines");
+            // Batch design-time targets. Even if some are unknown in older or custom .targets chains,
+            // MSBuild skips missing targets with a warning rather than failing,
+            // as long as they appear in a semicolon list after a known target.
+            // ComputeReferenceCLInput is kept first so that referenced public include directories
+            // are folded into ClCompile metadata before GetClCommandLines evaluates.
+            msbuildArgs.Add("/t:ComputeReferenceCLInput;GetProjectDirectories;GetClCommandLines");
 
             // Use separate /p: per property to avoid issues with semicolons
             // or special characters in property values
@@ -325,9 +369,13 @@ namespace MSBuild.CompileCommands.Extractor
 
             if (isCmdWrapper)
             {
-                // Build single command string for cmd.exe /c
-                var quotedArgs = msbuildArgs.Select(a => a.Contains(' ') ? $"\"{a}\"" : a);
-                startInfo.Arguments = $"/c \"{_msbuildPath}\" {string.Join(" ", quotedArgs)}";
+                // Build single command string for cmd.exe /c.
+                var quotedArgs = msbuildArgs.Select(QuoteCmdArg);
+                // Wrap the whole command in outer quotes: cmd /c "..." with multiple quoted
+                // args inside. Per `cmd /?`, when more than two quotes are present cmd strips
+                // the first and last quote and passes the rest through verbatim, so the outer
+                // pair protects the inner quoting.
+                startInfo.Arguments = $"/c \"\"{_msbuildPath}\" {string.Join(" ", quotedArgs)}\"";
 
                 // When using a .cmd/.bat wrapper that launches .NET Framework MSBuild,
                 // clear .NET SDK environment variables inherited from the dotnet host process.
@@ -354,6 +402,28 @@ namespace MSBuild.CompileCommands.Extractor
             {
                 foreach (var arg in msbuildArgs)
                     startInfo.ArgumentList.Add(arg);
+            }
+
+            // When the host process is a .NET SDK app (like this extractor),
+            // clear .NET SDK environment variables that would cause .NET Framework MSBuild
+            // to resolve targets from the wrong location.
+            // This applies to both .cmd wrappers and direct MSBuild.exe launches.
+            if (!isCmdWrapper)
+            {
+                var dotnetSdkVarsToClean = new[]
+                {
+                    "MSBuildExtensionsPath",
+                    "MSBuildSDKsPath",
+                    "MSBUILD_EXE_PATH",
+                    "MSBuildLoadMicrosoftTargetsReadOnly",
+                    "MSBUILDFAILONDRIVEENUMERATINGWILDCARD",
+                    "_MSBUILDTLENABLED",
+                    "DOTNET_HOST_PATH"
+                };
+                foreach (var varName in dotnetSdkVarsToClean)
+                {
+                    startInfo.Environment[varName] = "";
+                }
             }
 
             // Set environment variables for non-.cmd cases
@@ -409,7 +479,7 @@ namespace MSBuild.CompileCommands.Extractor
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var errorTask = process.StandardError.ReadToEndAsync();
 
-            // Enforce timeout FIRST — ReadToEnd blocks forever if the process hangs
+            // Enforce timeout FIRST. ReadToEnd blocks forever if the process hangs
             if (!process.WaitForExit(300000))
             {
                 try { process.Kill(true); } catch { }
@@ -438,35 +508,60 @@ namespace MSBuild.CompileCommands.Extractor
             var build = BinaryLog.ReadBuild(binlogPath);
             var target = build.FindFirstDescendant<Target>(t => t.Name == "GetClCommandLines");
 
-            // Extract ExternalIncludePath property from binlog
-            var externalIncludeProp = build.FindChildrenRecursive<Property>()
-                .LastOrDefault(p => p.Name == "ExternalIncludePath" && !string.IsNullOrEmpty(p.Value));
-            if (externalIncludeProp != null)
+            // Prefer GetProjectDirectories target output over raw property reads,
+            // it accounts for UseEnv=true and Makefile configuration resolution that
+            // raw property values miss.
+            string? includePath = null, externalIncludePath = null, vcToolsDirValue = null;
+            var projDirsTarget = build.FindFirstDescendant<Target>(t => t.Name == "GetProjectDirectories");
+            if (projDirsTarget != null)
             {
-                _externalIncludePaths = ResolveIncludePathEntries(
-                    externalIncludeProp.Value.Split(';', StringSplitOptions.RemoveEmptyEntries)).ToArray();
+                var outputsFolder = projDirsTarget.FindFirstDescendant<Folder>(f => f.Name == "TargetOutputs");
+                var directoriesItem = outputsFolder?.Children.OfType<Item>().FirstOrDefault();
+                if (directoriesItem != null)
+                {
+                    foreach (var md in directoriesItem.Children.OfType<Metadata>())
+                    {
+                        switch (md.Name)
+                        {
+                            case "IncludePath": includePath = md.Value; break;
+                            case "ExternalIncludePath": externalIncludePath = md.Value; break;
+                        }
+                    }
+                }
             }
 
-            // Extract IncludePath property from binlog. This property feeds the
-            // compiler's system include directories. Projects like SDL add source
-            // directories here instead of AdditionalIncludeDirectories, and
-            // GetClCommandLines does not emit /I flags for them.
-            var includePathProp = build.FindChildrenRecursive<Property>()
-                .LastOrDefault(p => p.Name == "IncludePath" && !string.IsNullOrEmpty(p.Value));
-            if (includePathProp != null)
+            // Fall back to Property nodes when GetProjectDirectories didn't run
+            // (older targets, unknown-target warning).
+            if (string.IsNullOrEmpty(externalIncludePath))
             {
-                var externalSet = new HashSet<string>(
-                    _externalIncludePaths, StringComparer.OrdinalIgnoreCase);
+                externalIncludePath = build.FindChildrenRecursive<Property>()
+                    .LastOrDefault(p => p.Name == "ExternalIncludePath" && !string.IsNullOrEmpty(p.Value))?.Value;
+            }
+            if (string.IsNullOrEmpty(includePath))
+            {
+                includePath = build.FindChildrenRecursive<Property>()
+                    .LastOrDefault(p => p.Name == "IncludePath" && !string.IsNullOrEmpty(p.Value))?.Value;
+            }
+
+            if (!string.IsNullOrEmpty(externalIncludePath))
+            {
+                _externalIncludePaths = ResolveIncludePathEntries(
+                    externalIncludePath.Split(';', StringSplitOptions.RemoveEmptyEntries)).ToArray();
+            }
+
+            if (!string.IsNullOrEmpty(includePath))
+            {
+                var externalSet = new HashSet<string>(_externalIncludePaths, StringComparer.OrdinalIgnoreCase);
                 _includePaths = ResolveIncludePathEntries(
-                    includePathProp.Value.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                    includePath.Split(';', StringSplitOptions.RemoveEmptyEntries))
                     .Where(p => !externalSet.Contains(p))
                     .ToArray();
             }
 
             // Add VS auxiliary include paths from VCToolsInstallDir
-            var vcToolsDirProp = build.FindChildrenRecursive<Property>()
-                .LastOrDefault(p => p.Name == "VCToolsInstallDir" && !string.IsNullOrEmpty(p.Value));
-            var vcToolsDir = _vcToolsInstallDir ?? vcToolsDirProp?.Value?.TrimEnd('\\');
+            vcToolsDirValue = build.FindChildrenRecursive<Property>()
+                .LastOrDefault(p => p.Name == "VCToolsInstallDir" && !string.IsNullOrEmpty(p.Value))?.Value;
+            var vcToolsDir = _vcToolsInstallDir ?? vcToolsDirValue?.TrimEnd('\\');
             var allIncludes = new HashSet<string>(_externalIncludePaths.Concat(_includePaths), StringComparer.OrdinalIgnoreCase);
             var auxPaths = GetVsAuxiliaryIncludePaths(vcToolsDir)
                 .Where(p => !allIncludes.Contains(p))
@@ -511,11 +606,30 @@ namespace MSBuild.CompileCommands.Extractor
             return entries;
         }
 
+        private static bool DetectFxCompile(IReadOnlyList<string> files)
+        {
+            // The CLCommandLine task runs separately for @(ClCompile) and @(FxCompile),
+            // and both outputs land in the same @(ClCommandLines) item group.
+            // Detect HLSL by file extensions, since fxc.exe flags are not consumable by clangd,
+            // so FxCompile entries must be dropped from standard output.
+            if (files.Count == 0) return false;
+            foreach (var f in files)
+            {
+                var ext = Path.GetExtension(f);
+                if (!string.Equals(ext, ".hlsl", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(ext, ".fx", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(ext, ".hlsli", StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            return true;
+        }
+
         private ClCommandLineEntry? ParseAddItem(AddItem addItem)
         {
             var commandLine = addItem.Name ?? "";
             var workingDir = "";
             var toolPath = "";
+            var configOptions = "";
             var files = new List<string>();
 
             foreach (var metadata in addItem.Children.OfType<Metadata>())
@@ -524,15 +638,22 @@ namespace MSBuild.CompileCommands.Extractor
                 {
                     case "WorkingDirectory": workingDir = metadata.Value; break;
                     case "ToolPath": toolPath = metadata.Value; break;
+                    case "ConfigurationOptions": configOptions = metadata.Value; break;
                     case "Files":
                         files.AddRange(metadata.Value.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(f => f.Trim()));
                         break;
                 }
             }
 
-            return files.Count > 0
-                ? new ClCommandLineEntry(commandLine, workingDir, toolPath, files.ToArray())
-                : null;
+            if (files.Count == 0) return null;
+
+            return new ClCommandLineEntry(
+                CommandLine: commandLine,
+                WorkingDirectory: workingDir,
+                ToolPath: toolPath,
+                Files: files.ToArray(),
+                IsConfigurationDefault: string.Equals(configOptions, "true", StringComparison.OrdinalIgnoreCase),
+                IsFxCompile: DetectFxCompile(files));
         }
 
         private ClCommandLineEntry? ParseItem(Item item)
@@ -540,6 +661,7 @@ namespace MSBuild.CompileCommands.Extractor
             var commandLine = item.Name ?? "";
             var workingDir = "";
             var toolPath = "";
+            var configOptions = "";
             var files = new List<string>();
 
             foreach (var metadata in item.Children.OfType<Metadata>())
@@ -548,24 +670,37 @@ namespace MSBuild.CompileCommands.Extractor
                 {
                     case "WorkingDirectory": workingDir = metadata.Value; break;
                     case "ToolPath": toolPath = metadata.Value; break;
+                    case "ConfigurationOptions": configOptions = metadata.Value; break;
                     case "Files":
                         files.AddRange(metadata.Value.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(f => f.Trim()));
                         break;
                 }
             }
 
-            return files.Count > 0
-                ? new ClCommandLineEntry(commandLine, workingDir, toolPath, files.ToArray())
-                : null;
+            if (files.Count == 0) return null;
+
+            return new ClCommandLineEntry(
+                CommandLine: commandLine,
+                WorkingDirectory: workingDir,
+                ToolPath: toolPath,
+                Files: files.ToArray(),
+                IsConfigurationDefault: string.Equals(configOptions, "true", StringComparison.OrdinalIgnoreCase),
+                IsFxCompile: DetectFxCompile(files));
         }
 
         private List<CompileCommand> ToCompileCommands(List<ClCommandLineEntry> entries)
         {
             var commands = new List<CompileCommand>();
             var projectName = Path.GetFileNameWithoutExtension(_projectPath);
+            string[]? defaultArgs = null;
 
             foreach (var entry in entries)
             {
+                // Drop FxCompile (HLSL) entries. fxc.exe flags are not
+                // cl.exe-compatible and clangd cannot consume them.
+                if (entry.IsFxCompile)
+                    continue;
+
                 var toolPath = ResolveToolPath(entry.ToolPath);
                 var baseArgs = new List<string> { toolPath };
 
@@ -584,19 +719,18 @@ namespace MSBuild.CompileCommands.Extractor
                 // relative to the project's /I flags from AdditionalIncludeDirectories.
                 //
                 // The default (Auto) classifies each path:
-                //   - paths inside the project tree are prepended (preserving the historical behavior
-                //     for projects like SDL that put source dirs in IncludePath),
-                //   - paths outside the project tree are appended (matching cl.exe semantics where
-                //     INCLUDE env-var paths are searched after explicit /I,
-                //     avoiding header shadowing such as DevDiv\inc\VS\version.h hiding a generated version.h).
+                //   - paths inside the project tree are prepended,
+                //     preserving the historical behavior for projects that place source dirs in IncludePath,
+                //   - paths outside the project tree are appended,
+                //     matching cl.exe semantics where INCLUDE env-var paths are searched after explicit /I,
+                //     which avoids header shadowing when a system header has the same name as a generated header.
                 var allSystemIncludes = _externalIncludePaths.Concat(_includePaths).ToArray();
                 var (prependIncludes, appendIncludes) = ClassifyIncludePaths(allSystemIncludes);
 
                 foreach (var p in prependIncludes)
                     baseArgs.Add($"/I{p}");
 
-                baseArgs.AddRange(CommandLineTokenizer.TokenizeWithResponseFiles(
-                    entry.CommandLine, entry.WorkingDirectory));
+                baseArgs.AddRange(CommandLineTokenizer.TokenizeWithResponseFiles(entry.CommandLine, entry.WorkingDirectory));
 
                 foreach (var p in appendIncludes)
                     baseArgs.Add($"/I{p}");
@@ -628,11 +762,40 @@ namespace MSBuild.CompileCommands.Extractor
 
                 foreach (var file in entry.Files)
                 {
+                    bool isTemporaryCpp = string.Equals(Path.GetFileName(file), "__temporary.cpp", StringComparison.OrdinalIgnoreCase);
+
+                    if (isTemporaryCpp)
+                    {
+                        if (_emitDefaults)
+                        {
+                            var defaultsFile = Path.Combine(entry.WorkingDirectory, "__project_defaults.cpp");
+                            var defaultsArgs = new List<string>(baseArgs) { defaultsFile };
+                            var sanitized = InProcessExtractor.SanitizeFallbackPaths(defaultsArgs.ToArray(), _vcToolsInstallDir);
+                            commands.Add(new CompileCommand(
+                                File: defaultsFile,
+                                Arguments: sanitized,
+                                Directory: entry.WorkingDirectory,
+                                ProjectPath: _projectPath,
+                                ProjectName: projectName,
+                                Configuration: _configuration,
+                                Platform: _platform
+                            ));
+                        }
+                        if (_mergeDefaults)
+                            defaultArgs = baseArgs.ToArray();
+                        continue;
+                    }
+
                     var fileArgs = new List<string>(baseArgs) { file };
+
+                    if (_mergeDefaults && defaultArgs != null)
+                        InProcessExtractor.MergeDefaultFlags(fileArgs, defaultArgs);
+
+                    var commandLine = InProcessExtractor.SanitizeFallbackPaths(fileArgs.ToArray(), _vcToolsInstallDir);
 
                     commands.Add(new CompileCommand(
                         File: file,
-                        Arguments: fileArgs.ToArray(),
+                        Arguments: commandLine,
                         Directory: entry.WorkingDirectory,
                         ProjectPath: _projectPath,
                         ProjectName: projectName,
@@ -937,10 +1100,11 @@ namespace MSBuild.CompileCommands.Extractor
                     : Path.GetFullPath(Path.Combine(projectDir, file));
 
                 var fileArgs = new List<string>(baseArgs) { fullPath };
+                var commandLine = InProcessExtractor.SanitizeFallbackPaths(fileArgs.ToArray(), _vcToolsInstallDir);
 
                 commands.Add(new CompileCommand(
                     File: fullPath,
-                    Arguments: fileArgs.ToArray(),
+                    Arguments: commandLine,
                     Directory: projectDir,
                     ProjectPath: _projectPath,
                     ProjectName: projectName,
@@ -959,7 +1123,9 @@ namespace MSBuild.CompileCommands.Extractor
             IReadOnlyDictionary<string, string>? msbuildProperties = null,
             IReadOnlyDictionary<string, string>? msbuildEnv = null,
             MsBuildLauncher launcher = MsBuildLauncher.Auto,
-            IncludePathOrder includePathOrder = IncludePathOrder.Auto)
+            IncludePathOrder includePathOrder = IncludePathOrder.Auto,
+            bool emitDefaults = false,
+            bool mergeDefaults = false)
         {
             var solutionDir = Path.GetDirectoryName(Path.GetFullPath(solutionPath))!;
             var projects = ProjectDiscovery.GetVcProjectsFromSolution(solutionPath);
@@ -975,7 +1141,9 @@ namespace MSBuild.CompileCommands.Extractor
                         msbuildProperties: msbuildProperties,
                         msbuildEnv: msbuildEnv,
                         launcher: launcher,
-                        includePathOrder: includePathOrder);
+                        includePathOrder: includePathOrder,
+                        emitDefaults: emitDefaults,
+                        mergeDefaults: mergeDefaults);
                     allCommands.AddRange(extractor.ExtractCompileCommands());
                 }
                 catch (Exception ex)

@@ -11,7 +11,31 @@ namespace MSBuild.CompileCommands.Extractor
         string CommandLine,
         string WorkingDirectory,
         string ToolPath,
-        string[] Files
+        string[] Files,
+        // True when this entry came from the synthetic __temporary.cpp probe injected by
+        // InitGetClCommandLines in Microsoft.Cpp.DesignTime.targets (tag: ConfigurationOptions=true).
+        // Represents the project-wide default switches used for files with no per-file overrides.
+        bool IsConfigurationDefault = false,
+        // True when the entry originated from @(FxCompile) (HLSL) rather than @(ClCompile).
+        // The Microsoft.Cpp.DesignTime.targets target runs CLCommandLine separately for
+        // FxCompile and merges output into the same @(ClCommandLines) group. FxCompile
+        // switches are fxc.exe flags, not cl.exe flags, and are not consumable by clangd,
+        // so we drop them from standard compile_commands.json output.
+        bool IsFxCompile = false
+    );
+
+    /// <summary>
+    /// Project-level IntelliSense directories extracted from the GetProjectDirectories
+    /// target (one _ProjectDirectories item).
+    /// </summary>
+    public record ProjectDirectories(
+        string IncludePath,
+        string ExternalIncludePath,
+        string FrameworkIncludePath,
+        string ExcludePath,
+        string ReferencePath,
+        string ProjectDir,
+        string ToolsetISenseIdentifier
     );
 
     public interface ICompileCommandsExtractor
