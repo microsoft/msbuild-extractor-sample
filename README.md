@@ -158,7 +158,7 @@ dotnet build
 - **C++20 modules** (`.ixx`/`.cppm`) are extracted but skipped during `--validate` (require `/interface` flag)
 - **NuGet native packages** must be restored before extraction (`nuget restore` or `msbuild -t:Restore`)
 - **Build-generated files** (MIDL proxies, code generators) won't exist until a full build is done
-- **Precompiled headers** are stripped during `--validate` because PCH files require exact flag matching with the original build. Files that depend on PCH for include ordering or platform abstractions (e.g., `stdafx.h` pulling in Windows headers) may fail validation even though the extracted compile command is correct for IntelliSense
+- **Precompiled headers** are removed during `--validate` because PCH files require exact flag matching with the original build.
 - Windows-only, requires Visual Studio and MSVC toolchain
 
 ## License
