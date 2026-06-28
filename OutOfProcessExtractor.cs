@@ -1120,6 +1120,7 @@ namespace MSBuild.CompileCommands.Extractor
             string msbuildPath, string solutionPath, string configuration = "Debug",
             string platform = "x64", bool enableLogger = false,
             string? vcToolsInstallDir = null, string? vcTargetsPath = null,
+            string? clPath = null,
             IReadOnlyDictionary<string, string>? msbuildProperties = null,
             IReadOnlyDictionary<string, string>? msbuildEnv = null,
             MsBuildLauncher launcher = MsBuildLauncher.Auto,
@@ -1138,6 +1139,7 @@ namespace MSBuild.CompileCommands.Extractor
                     var extractor = new OutOfProcessExtractor(
                         msbuildPath, project.Path, configuration, platform, enableLogger,
                         solutionDir, vcToolsInstallDir, vcTargetsPath,
+                        clPath,
                         msbuildProperties: msbuildProperties,
                         msbuildEnv: msbuildEnv,
                         launcher: launcher,
@@ -1158,9 +1160,9 @@ namespace MSBuild.CompileCommands.Extractor
         public static void WriteCompileCommandsJsonFromSolution(
             string msbuildPath, string solutionPath, string configuration = "Debug",
             string platform = "x64", bool enableLogger = false, string? outputPath = null,
-            string? vcToolsInstallDir = null, string? vcTargetsPath = null)
+            string? vcToolsInstallDir = null, string? vcTargetsPath = null, string? clPath = null)
         {
-            var commands = ExtractCompileCommandsFromSolution(msbuildPath, solutionPath, configuration, platform, enableLogger, vcToolsInstallDir, vcTargetsPath);
+            var commands = ExtractCompileCommandsFromSolution(msbuildPath, solutionPath, configuration, platform, enableLogger, vcToolsInstallDir, vcTargetsPath, clPath);
             outputPath ??= Path.Combine(Path.GetDirectoryName(Path.GetFullPath(solutionPath))!, "compile_commands.json");
 
             var json = JsonSerializer.Serialize(commands, new JsonSerializerOptions
