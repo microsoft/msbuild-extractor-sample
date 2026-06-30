@@ -395,7 +395,7 @@ namespace MSBuild.CompileCommands.Extractor
                 };
                 foreach (var varName in dotnetSdkVarsToClean)
                 {
-                    startInfo.Environment[varName] = "";
+                    startInfo.Environment.Remove(varName);
                 }
             }
             else
