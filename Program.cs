@@ -329,6 +329,7 @@ namespace MSBuild.CompileCommands.Extractor
                 return OutOfProcessExtractor.ExtractCompileCommandsFromSolution(
                     options.MsBuildPath!, options.Solution, options.Configuration, options.Platform,
                     options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath,
+                    clPath: options.ClPath,
                     emitDefaults: options.EmitDefaults, mergeDefaults: options.MergeDefaults);
             }
             else
@@ -362,6 +363,7 @@ namespace MSBuild.CompileCommands.Extractor
                         commands = OutOfProcessExtractor.ExtractCompileCommandsFromSolution(
                             options.MsBuildPath!, sln, options.Configuration, options.Platform,
                             options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath,
+                            clPath: options.ClPath,
                             msbuildProperties: options.MsBuildProperties,
                             msbuildEnv: options.MsBuildEnv,
                             launcher: ParseLauncher(options.MsBuildLauncher),

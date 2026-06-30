@@ -63,6 +63,20 @@ msbuild-extractor-sample --solution myapp.sln --format rich -o compile_database.
 msbuild-extractor-sample --solution myapp.sln --msbuild-path "C:\VS\MSBuild\Current\Bin\MSBuild.exe" -c Debug -a x64
 ```
 
+### Pin a specific toolchain (custom MSBuild, VC targets, and cl.exe)
+
+Useful when the build uses a non-Visual-Studio toolchain (e.g. a package-based
+MSBuild/MSVC) and you want `compile_commands.json` to reference that exact compiler
+instead of an auto-detected Visual Studio install. `--cl-path` is honored for both
+`--project` and `--solution` inputs.
+
+```bash
+msbuild-extractor-sample --solution myapp.sln -c Debug -a x64 \
+  --msbuild-path "C:\path\to\MSBuild\Current\Bin\amd64\MSBuild.exe" \
+  --vc-targets-path "C:\path\to\MSBuild\Extensions\Microsoft\VC\v170\" \
+  --cl-path "C:\path\to\VisualCppTools\lib\native\bin\cl.exe"
+```
+
 ## Features
 
 - **Zero-config extraction** - auto-detects Visual Studio via `vswhere.exe`, resolves `VCTargetsPath`, `VCToolsInstallDir`, and real `cl.exe` path automatically
@@ -129,6 +143,7 @@ Options:
   --list-instances                  List all Visual Studio installations and exit
   --vc-targets-path <path>          VC targets directory (auto-detected)
   --vc-tools-install-dir <path>     VCToolsInstallDir property (auto-detected)
+  --cl-path <path>                  cl.exe path (overrides the resolved compiler; honored for --project and --solution)
   --msbuild-path <path>             MSBuild.exe path (enables out-of-process mode)
   --use-dev-env                     Read Developer Command Prompt environment variables
   --c-cpp-properties                Emit .vscode/c_cpp_properties.json alongside the output
