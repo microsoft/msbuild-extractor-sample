@@ -6,9 +6,11 @@ namespace MSBuild.CompileCommands.Extractor
     {
         public string[] Projects { get; set; } = [];
         public string[] Solutions { get; set; } = [];
+        public string[] DirsProjs { get; set; } = [];
 
         public string? Project => Projects.Length == 1 ? Projects[0] : null;
         public string? Solution => Solutions.Length == 1 ? Solutions[0] : null;
+        public string? DirsProj => DirsProjs.Length == 1 ? DirsProjs[0] : null;
         public string Configuration { get; set; } = "Debug";
         public string Platform { get; set; } = "x64";
         public string? VsPath { get; set; }
@@ -51,6 +53,12 @@ namespace MSBuild.CompileCommands.Extractor
             var solutionOption = new Option<string[]>("--solution", "-s")
             {
                 Description = "Path to .sln or .slnx file (can be specified multiple times)",
+                AllowMultipleArgumentsPerToken = true
+            };
+
+            var dirsProjOption = new Option<string[]>("--dirs-proj")
+            {
+                Description = "Path to an MSBuild traversal dirs.proj (Sdk=\"Microsoft.Build.Traversal\"); recurses into nested dirs.proj and extracts every referenced .vcxproj. Can be specified multiple times.",
                 AllowMultipleArgumentsPerToken = true
             };
 
@@ -219,6 +227,7 @@ namespace MSBuild.CompileCommands.Extractor
             var rootCommand = new RootCommand("Extract compile_commands.json from Visual C++ MSBuild projects");
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(solutionOption);
+            rootCommand.Options.Add(dirsProjOption);
             rootCommand.Options.Add(configOption);
             rootCommand.Options.Add(platformOption);
             rootCommand.Options.Add(vsPathOption);
@@ -256,9 +265,10 @@ namespace MSBuild.CompileCommands.Extractor
 
                 var projects = commandResult.GetValue(projectOption) ?? [];
                 var solutions = commandResult.GetValue(solutionOption) ?? [];
+                var dirsProjs = commandResult.GetValue(dirsProjOption) ?? [];
 
-                if (projects.Length == 0 && solutions.Length == 0)
-                    commandResult.AddError("At least one --project or --solution must be specified.");
+                if (projects.Length == 0 && solutions.Length == 0 && dirsProjs.Length == 0)
+                    commandResult.AddError("At least one --project, --solution, or --dirs-proj must be specified.");
 
                 if (commandResult.GetValue(cCppPropertiesOption) && commandResult.GetValue(formatOption) == "rich")
                     commandResult.AddError("--c-cpp-properties cannot be used with --format rich (rich format does not produce compile_commands.json).");
@@ -270,6 +280,7 @@ namespace MSBuild.CompileCommands.Extractor
                 {
                     Projects = parseResult.GetValue(projectOption) ?? [],
                     Solutions = parseResult.GetValue(solutionOption) ?? [],
+                    DirsProjs = parseResult.GetValue(dirsProjOption) ?? [],
                     Configuration = parseResult.GetValue(configOption)!,
                     Platform = parseResult.GetValue(platformOption)!,
                     VsPath = parseResult.GetValue(vsPathOption),

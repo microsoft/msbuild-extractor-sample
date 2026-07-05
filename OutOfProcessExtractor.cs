@@ -1130,6 +1130,42 @@ namespace MSBuild.CompileCommands.Extractor
         {
             var solutionDir = Path.GetDirectoryName(Path.GetFullPath(solutionPath))!;
             var projects = ProjectDiscovery.GetVcProjectsFromSolution(solutionPath);
+            return ExtractCompileCommandsFromProjects(
+                msbuildPath, projects, solutionDir, configuration, platform, enableLogger,
+                vcToolsInstallDir, vcTargetsPath, clPath, msbuildProperties, msbuildEnv,
+                launcher, includePathOrder, emitDefaults, mergeDefaults);
+        }
+
+        public static List<CompileCommand> ExtractCompileCommandsFromDirsProj(
+            string msbuildPath, string dirsProjPath, string configuration = "Debug",
+            string platform = "x64", bool enableLogger = false,
+            string? vcToolsInstallDir = null, string? vcTargetsPath = null,
+            string? clPath = null,
+            IReadOnlyDictionary<string, string>? msbuildProperties = null,
+            IReadOnlyDictionary<string, string>? msbuildEnv = null,
+            MsBuildLauncher launcher = MsBuildLauncher.Auto,
+            IncludePathOrder includePathOrder = IncludePathOrder.Auto,
+            bool emitDefaults = false,
+            bool mergeDefaults = false)
+        {
+            // The dirs.proj directory plays the same role as SolutionDir for $(SolutionDir).
+            var baseDir = Path.GetDirectoryName(Path.GetFullPath(dirsProjPath))!;
+            var projects = ProjectDiscovery.GetVcProjectsFromDirsProj(dirsProjPath);
+            return ExtractCompileCommandsFromProjects(
+                msbuildPath, projects, baseDir, configuration, platform, enableLogger,
+                vcToolsInstallDir, vcTargetsPath, clPath, msbuildProperties, msbuildEnv,
+                launcher, includePathOrder, emitDefaults, mergeDefaults);
+        }
+
+        private static List<CompileCommand> ExtractCompileCommandsFromProjects(
+            string msbuildPath, List<VcProject> projects, string solutionDir,
+            string configuration, string platform, bool enableLogger,
+            string? vcToolsInstallDir, string? vcTargetsPath, string? clPath,
+            IReadOnlyDictionary<string, string>? msbuildProperties,
+            IReadOnlyDictionary<string, string>? msbuildEnv,
+            MsBuildLauncher launcher, IncludePathOrder includePathOrder,
+            bool emitDefaults, bool mergeDefaults)
+        {
             var allCommands = new List<CompileCommand>();
 
             foreach (var project in projects)

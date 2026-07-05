@@ -1,6 +1,6 @@
 # MSBuild Compile Commands Extractor
 
-This repo contains a sample that demonstrates how to extract [`compile_commands.json`](https://clang.llvm.org/docs/JSONCompilationDatabase.html) from Visual C++ MSBuild projects (.vcxproj, .sln, .slnx) using the MSBuild API.
+This repo contains a sample that demonstrates how to extract [`compile_commands.json`](https://clang.llvm.org/docs/JSONCompilationDatabase.html) from Visual C++ MSBuild projects (.vcxproj, .sln, .slnx, dirs.proj) using the MSBuild API.
 
 The generated compilation database can be used with VS Code and C++ LSP tools for IntelliSense, code navigation, and static analysis.
 
@@ -16,6 +16,16 @@ msbuild-extractor-sample --project myapp.vcxproj -c Debug -a x64
 
 ```bash
 msbuild-extractor-sample --solution myapp.sln -c Debug -a x64 -o compile_commands.json
+```
+
+### Traversal dirs.proj
+
+Extract every `.vcxproj` referenced by an MSBuild traversal project
+(`Sdk="Microsoft.Build.Traversal"`), recursing into nested `dirs.proj`. Non-VC
+references (`.csproj`, etc.) are skipped.
+
+```bash
+msbuild-extractor-sample --dirs-proj dirs.proj -c Debug -a x64 -o compile_commands.json
 ```
 
 ### Auto-detect Visual Studio (no manual paths needed)
@@ -91,6 +101,7 @@ msbuild-extractor-sample --solution myapp.sln -c Debug -a x64 \
 - **VS instance selection** - `--list-instances` shows all VS installations; `--vs-instance <id>` selects by instance ID
 - **LSP compatible** - uses the real `cl.exe` path and adds `-ferror-limit=0` and `--target` so C++ LSP tools work out of the box
 - **Solution formats** - `.sln`, `.slnx`, and GN-generated `.sln` files
+- **Traversal projects** - `--dirs-proj` extracts every `.vcxproj` referenced by an MSBuild `dirs.proj` (`Sdk="Microsoft.Build.Traversal"`), recursing into nested `dirs.proj`
 - **C++/WinRT support** - resolves `WindowsTargetPlatformVersion` (e.g., `10.0` → `10.0.26100.0`) so UWP and WinRT projects like Windows Terminal and Calculator extract correctly
 - **Response file expansion** - transparently inlines `@response.rsp` files during tokenization
 - **VS Code integration** - `--c-cpp-properties` emits a matching `.vscode/c_cpp_properties.json` for the VS Code C/C++ extension
@@ -125,6 +136,7 @@ msbuild-extractor-sample [options]
 Options:
   -p, --project <path>              Path to .vcxproj file (repeatable)
   -s, --solution <path>             Path to .sln or .slnx file (repeatable)
+  --dirs-proj <path>                Path to an MSBuild traversal dirs.proj (repeatable; recurses into nested dirs.proj)
   -c, --configuration <name>        Build configuration [default: Debug]
   -a, --platform <name>             Build platform [default: x64]
   -o, --output <path>               Output path [default: compile_commands.json]
@@ -150,7 +162,7 @@ Options:
   --logger                          Enable MSBuild console logger output
 ```
 
-At least one `--project` or `--solution` must be specified. Both can be repeated and combined.
+At least one `--project`, `--solution`, or `--dirs-proj` must be specified. Both can be repeated and combined.
 
 The output includes a sentinel entry (`.msbuild-extractor-sample`) as the first element so consumers can identify the generator. Standard C++ LSP tools silently skip it since the file does not exist on disk.
 

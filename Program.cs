@@ -107,7 +107,7 @@ namespace MSBuild.CompileCommands.Extractor
             if (!options.AllConfigurations)
                 ValidateConfigurations(options);
 
-            bool isMultiInput = options.Solutions.Length + options.Projects.Length > 1;
+            bool isMultiInput = options.Solutions.Length + options.Projects.Length + options.DirsProjs.Length > 1;
 
             // Handle --all-configurations
             if (options.AllConfigurations)
@@ -184,6 +184,37 @@ namespace MSBuild.CompileCommands.Extractor
                 }
             }
 
+            foreach (var dirsProj in options.DirsProjs)
+            {
+                var projects = ProjectDiscovery.GetVcProjectsFromDirsProj(dirsProj);
+                var errors = new List<string>();
+
+                foreach (var project in projects)
+                {
+                    // dirs.proj projects derive their configs from the .vcxproj; only validate
+                    // when configs were discoverable to avoid spurious warnings.
+                    if (project.ConfigurationPlatforms.Length > 0 &&
+                        !project.HasConfigurationPlatform(options.Configuration, options.Platform))
+                    {
+                        var available = string.Join(", ", project.ConfigurationPlatforms.Select(cp => cp.ToString()));
+                        errors.Add($"Configuration '{options.Configuration}|{options.Platform}' not found in {project.Name}. Available: {available}");
+                    }
+                }
+
+                if (errors.Count > 0)
+                {
+                    foreach (var error in errors)
+                    {
+                        Console.Error.WriteLine(options.Strict ? $"Error: {error}" : $"Warning: {error}");
+                    }
+                    if (options.Strict)
+                    {
+                        Console.Error.WriteLine($"Aborting: {errors.Count} project(s) do not support the requested configuration.");
+                        Environment.Exit(1);
+                    }
+                }
+            }
+
             foreach (var proj in options.Projects)
             {
                 var validationError = ProjectDiscovery.ValidateConfigurationPlatform(
@@ -227,7 +258,7 @@ namespace MSBuild.CompileCommands.Extractor
 
                 try
                 {
-                    bool isMultiInput = options.Solutions.Length + options.Projects.Length > 1;
+                    bool isMultiInput = options.Solutions.Length + options.Projects.Length + options.DirsProjs.Length > 1;
                     List<CompileCommand> commands;
                     if (isMultiInput)
                         commands = ExtractMultipleInputs(options);
@@ -287,6 +318,12 @@ namespace MSBuild.CompileCommands.Extractor
                     .SelectMany(p => p.ConfigurationPlatforms));
             }
 
+            foreach (var dirsProj in options.DirsProjs)
+            {
+                all.AddRange(ProjectDiscovery.GetVcProjectsFromDirsProj(dirsProj)
+                    .SelectMany(p => p.ConfigurationPlatforms));
+            }
+
             foreach (var proj in options.Projects)
             {
                 all.AddRange(ProjectDiscovery.GetProjectConfigurations(proj));
@@ -299,7 +336,7 @@ namespace MSBuild.CompileCommands.Extractor
         {
             if (options.Output != null)
                 return Path.GetDirectoryName(Path.GetFullPath(options.Output)) ?? ".";
-            var inputPath = options.Solutions.FirstOrDefault() ?? options.Projects.First();
+            var inputPath = options.Solutions.FirstOrDefault() ?? options.DirsProjs.FirstOrDefault() ?? options.Projects.First();
             return Path.GetDirectoryName(Path.GetFullPath(inputPath)) ?? ".";
         }
 
@@ -309,6 +346,13 @@ namespace MSBuild.CompileCommands.Extractor
             {
                 return InProcessExtractor.ExtractCompileCommandsFromSolution(
                     options.Solution, options.Configuration, options.Platform,
+                    options.EnableLogger, options.VcToolsInstallDir,
+                    options.EmitDefaults, options.MergeDefaults);
+            }
+            else if (options.DirsProjs.Length > 0 && options.DirsProj != null)
+            {
+                return InProcessExtractor.ExtractCompileCommandsFromDirsProj(
+                    options.DirsProj, options.Configuration, options.Platform,
                     options.EnableLogger, options.VcToolsInstallDir,
                     options.EmitDefaults, options.MergeDefaults);
             }
@@ -330,6 +374,18 @@ namespace MSBuild.CompileCommands.Extractor
                     options.MsBuildPath!, options.Solution, options.Configuration, options.Platform,
                     options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath,
                     clPath: options.ClPath,
+                    emitDefaults: options.EmitDefaults, mergeDefaults: options.MergeDefaults);
+            }
+            else if (options.DirsProjs.Length > 0 && options.DirsProj != null)
+            {
+                return OutOfProcessExtractor.ExtractCompileCommandsFromDirsProj(
+                    options.MsBuildPath!, options.DirsProj, options.Configuration, options.Platform,
+                    options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath,
+                    clPath: options.ClPath,
+                    msbuildProperties: options.MsBuildProperties,
+                    msbuildEnv: options.MsBuildEnv,
+                    launcher: ParseLauncher(options.MsBuildLauncher),
+                    includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
                     emitDefaults: options.EmitDefaults, mergeDefaults: options.MergeDefaults);
             }
             else
@@ -381,6 +437,37 @@ namespace MSBuild.CompileCommands.Extractor
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"  Warning: Failed for {sln}: {ex.Message}");
+                }
+            }
+
+            foreach (var dirsProj in options.DirsProjs)
+            {
+                Console.WriteLine($"Extracting from dirs.proj: {Path.GetFileName(dirsProj)}...");
+                try
+                {
+                    List<CompileCommand> commands;
+                    if (isOutOfProcess)
+                        commands = OutOfProcessExtractor.ExtractCompileCommandsFromDirsProj(
+                            options.MsBuildPath!, dirsProj, options.Configuration, options.Platform,
+                            options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath,
+                            clPath: options.ClPath,
+                            msbuildProperties: options.MsBuildProperties,
+                            msbuildEnv: options.MsBuildEnv,
+                            launcher: ParseLauncher(options.MsBuildLauncher),
+                            includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
+                            emitDefaults: options.EmitDefaults,
+                            mergeDefaults: options.MergeDefaults);
+                    else
+                        commands = InProcessExtractor.ExtractCompileCommandsFromDirsProj(
+                            dirsProj, options.Configuration, options.Platform,
+                            options.EnableLogger, options.VcToolsInstallDir,
+                            options.EmitDefaults, options.MergeDefaults);
+                    Console.WriteLine($"  Got {commands.Count} entries");
+                    allCommands.AddRange(commands);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"  Warning: Failed for {dirsProj}: {ex.Message}");
                 }
             }
 
@@ -493,7 +580,7 @@ namespace MSBuild.CompileCommands.Extractor
 
         static string GetDefaultOutputPath(CommandLineOptions options)
         {
-            var inputPath = options.Solutions.FirstOrDefault() ?? options.Projects.First();
+            var inputPath = options.Solutions.FirstOrDefault() ?? options.DirsProjs.FirstOrDefault() ?? options.Projects.First();
             var dir = Path.GetDirectoryName(Path.GetFullPath(inputPath))!;
             var filename = options.Format == "rich" ? "compile_database.json" : "compile_commands.json";
             return Path.Combine(dir, filename);
