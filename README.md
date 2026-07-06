@@ -102,6 +102,7 @@ msbuild-extractor-sample --solution myapp.sln -c Debug -a x64 \
 - **LSP compatible** - uses the real `cl.exe` path and adds `-ferror-limit=0` and `--target` so C++ LSP tools work out of the box
 - **Solution formats** - `.sln`, `.slnx`, and GN-generated `.sln` files
 - **Traversal projects** - `--dirs-proj` extracts every `.vcxproj` referenced by an MSBuild `dirs.proj` (`Sdk="Microsoft.Build.Traversal"`), recursing into nested `dirs.proj`
+- **Follow project references** - `--follow-project-references` additionally extracts projects reachable via `.vcxproj` `<ProjectReference>` edges (transitive). Only plain relative references are followed; MSBuild-property references (`$(..)`) are skipped, so it captures wrapper+Lib layouts (where a source-less wrapper references a `*Lib.vcxproj`) without pulling in the entire dependency graph
 - **C++/WinRT support** - resolves `WindowsTargetPlatformVersion` (e.g., `10.0` → `10.0.26100.0`) so UWP and WinRT projects like Windows Terminal and Calculator extract correctly
 - **Response file expansion** - transparently inlines `@response.rsp` files during tokenization
 - **VS Code integration** - `--c-cpp-properties` emits a matching `.vscode/c_cpp_properties.json` for the VS Code C/C++ extension
@@ -137,6 +138,7 @@ Options:
   -p, --project <path>              Path to .vcxproj file (repeatable)
   -s, --solution <path>             Path to .sln or .slnx file (repeatable)
   --dirs-proj <path>                Path to an MSBuild traversal dirs.proj (repeatable; recurses into nested dirs.proj)
+  --follow-project-references       Also extract projects reachable via .vcxproj <ProjectReference> edges (transitive; skips $(..) property references)
   -c, --configuration <name>        Build configuration [default: Debug]
   -a, --platform <name>             Build platform [default: x64]
   -o, --output <path>               Output path [default: compile_commands.json]

@@ -326,5 +326,87 @@ namespace MSBuild.CompileCommands.Extractor
             foreach (var f in files)
                 yield return f;
         }
+
+        /// <summary>
+        /// Reads the .vcxproj-to-.vcxproj &lt;ProjectReference&gt; edges of a .vcxproj and returns
+        /// absolute paths to existing .vcxproj files. References that use unresolved MSBuild
+        /// property/item expansions ($(..)/%(..)) are skipped (so cross-tree / package references
+        /// that require full MSBuild evaluation do not pull in the entire dependency graph).
+        /// </summary>
+        public static List<string> GetProjectReferences(string vcxprojPath)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrWhiteSpace(vcxprojPath) || !File.Exists(vcxprojPath))
+                return result;
+
+            XDocument doc;
+            try { doc = XDocument.Load(vcxprojPath); }
+            catch { return result; }
+
+            var ns = doc.Root?.Name.Namespace ?? XNamespace.None;
+            var baseDir = Path.GetDirectoryName(Path.GetFullPath(vcxprojPath))!;
+
+            var includes = doc.Descendants(ns + "ProjectReference")
+                .Select(e => e.Attribute("Include")?.Value)
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Cast<string>();
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var include in includes)
+            {
+                foreach (var resolved in ResolveTraversalInclude(baseDir, include))
+                {
+                    if (resolved.EndsWith(".vcxproj", StringComparison.OrdinalIgnoreCase) &&
+                        File.Exists(resolved) && seen.Add(resolved))
+                    {
+                        result.Add(resolved);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Expands a seed set of VC projects with the transitive closure of their
+        /// .vcxproj-to-.vcxproj &lt;ProjectReference&gt; edges (see <see cref="GetProjectReferences"/>).
+        /// The seeds are always included; the result is deduped by full path. Useful for wrapper+Lib
+        /// layouts where the referenced *Lib.vcxproj carries the ClCompile source while the referencing
+        /// wrapper project has none.
+        /// </summary>
+        public static List<VcProject> ExpandWithProjectReferences(IEnumerable<VcProject> seeds)
+        {
+            var result = new List<VcProject>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var queue = new Queue<string>();
+
+            foreach (var seed in seeds)
+            {
+                var full = Path.GetFullPath(seed.Path);
+                if (seen.Add(full))
+                {
+                    result.Add(seed);
+                    queue.Enqueue(full);
+                }
+            }
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                foreach (var referenced in GetProjectReferences(current))
+                {
+                    if (seen.Add(referenced))
+                    {
+                        result.Add(new VcProject(
+                            Path: referenced,
+                            Name: Path.GetFileNameWithoutExtension(referenced),
+                            ConfigurationPlatforms: GetProjectConfigurations(referenced)));
+                        queue.Enqueue(referenced);
+                    }
+                }
+            }
+
+            return result;
+        }
     }
 }

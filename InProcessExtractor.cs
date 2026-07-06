@@ -1069,32 +1069,36 @@ namespace MSBuild.CompileCommands.Extractor
         public static List<CompileCommand> ExtractCompileCommandsFromSolution(
             string solutionPath, string configuration = "Debug", string platform = "x64",
             bool enableLogger = false, string? vcToolsInstallDir = null,
-            bool emitDefaults = false, bool mergeDefaults = false)
+            bool emitDefaults = false, bool mergeDefaults = false, bool followProjectReferences = false)
         {
             var solutionDir = Path.GetDirectoryName(Path.GetFullPath(solutionPath))!;
             var projects = ProjectDiscovery.GetVcProjectsFromSolution(solutionPath);
             return ExtractCompileCommandsFromProjects(
                 projects, solutionDir, configuration, platform, enableLogger,
-                vcToolsInstallDir, emitDefaults, mergeDefaults);
+                vcToolsInstallDir, emitDefaults, mergeDefaults, followProjectReferences);
         }
 
         public static List<CompileCommand> ExtractCompileCommandsFromDirsProj(
             string dirsProjPath, string configuration = "Debug", string platform = "x64",
             bool enableLogger = false, string? vcToolsInstallDir = null,
-            bool emitDefaults = false, bool mergeDefaults = false)
+            bool emitDefaults = false, bool mergeDefaults = false, bool followProjectReferences = false)
         {
             // The dirs.proj directory plays the same role as SolutionDir for $(SolutionDir).
             var baseDir = Path.GetDirectoryName(Path.GetFullPath(dirsProjPath))!;
             var projects = ProjectDiscovery.GetVcProjectsFromDirsProj(dirsProjPath);
             return ExtractCompileCommandsFromProjects(
                 projects, baseDir, configuration, platform, enableLogger,
-                vcToolsInstallDir, emitDefaults, mergeDefaults);
+                vcToolsInstallDir, emitDefaults, mergeDefaults, followProjectReferences);
         }
 
-        private static List<CompileCommand> ExtractCompileCommandsFromProjects(
-            List<VcProject> projects, string solutionDir, string configuration, string platform,
-            bool enableLogger, string? vcToolsInstallDir, bool emitDefaults, bool mergeDefaults)
+        public static List<CompileCommand> ExtractCompileCommandsFromProjects(
+            List<VcProject> projects, string? solutionDir, string configuration, string platform,
+            bool enableLogger, string? vcToolsInstallDir, bool emitDefaults, bool mergeDefaults,
+            bool followProjectReferences = false)
         {
+            if (followProjectReferences)
+                projects = ProjectDiscovery.ExpandWithProjectReferences(projects);
+
             var allCommands = new List<CompileCommand>();
 
             foreach (var project in projects)

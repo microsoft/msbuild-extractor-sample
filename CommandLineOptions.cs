@@ -35,6 +35,7 @@ namespace MSBuild.CompileCommands.Extractor
         public bool EmitCCppProperties { get; set; }
         public bool EmitDefaults { get; set; }
         public bool MergeDefaults { get; set; }
+        public bool FollowProjectReferences { get; set; }
         public Dictionary<string, string> MsBuildProperties { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> MsBuildEnv { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public string MsBuildLauncher { get; set; } = "auto";
@@ -224,6 +225,12 @@ namespace MSBuild.CompileCommands.Extractor
             };
             includePathOrderOption.AcceptOnlyFromAmong("auto", "prepend", "append");
 
+            var followProjectReferencesOption = new Option<bool>("--follow-project-references")
+            {
+                Description = "Also extract projects reachable via .vcxproj <ProjectReference> edges (transitive). Only plain relative references are followed; MSBuild-property references ($(..)) are skipped, so cross-tree/package references do not pull in the whole dependency graph. Useful for wrapper+Lib layouts where the referenced *Lib project carries the source.",
+                DefaultValueFactory = _ => false
+            };
+
             var rootCommand = new RootCommand("Extract compile_commands.json from Visual C++ MSBuild projects");
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(solutionOption);
@@ -256,6 +263,7 @@ namespace MSBuild.CompileCommands.Extractor
             rootCommand.Options.Add(msbuildEnvOption);
             rootCommand.Options.Add(msbuildLauncherOption);
             rootCommand.Options.Add(includePathOrderOption);
+            rootCommand.Options.Add(followProjectReferencesOption);
 
             rootCommand.Validators.Add(commandResult =>
             {
@@ -308,7 +316,8 @@ namespace MSBuild.CompileCommands.Extractor
                     MsBuildProperties = ParseKeyValuePairs(parseResult.GetValue(msbuildPropertyOption), "--msbuild-property"),
                     MsBuildEnv = ParseKeyValuePairs(parseResult.GetValue(msbuildEnvOption), "--msbuild-env"),
                     MsBuildLauncher = parseResult.GetValue(msbuildLauncherOption)!,
-                    IncludePathOrder = parseResult.GetValue(includePathOrderOption)!
+                    IncludePathOrder = parseResult.GetValue(includePathOrderOption)!,
+                    FollowProjectReferences = parseResult.GetValue(followProjectReferencesOption)
                 };
             });
 

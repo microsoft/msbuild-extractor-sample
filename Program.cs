@@ -347,14 +347,24 @@ namespace MSBuild.CompileCommands.Extractor
                 return InProcessExtractor.ExtractCompileCommandsFromSolution(
                     options.Solution, options.Configuration, options.Platform,
                     options.EnableLogger, options.VcToolsInstallDir,
-                    options.EmitDefaults, options.MergeDefaults);
+                    options.EmitDefaults, options.MergeDefaults, options.FollowProjectReferences);
             }
             else if (options.DirsProjs.Length > 0 && options.DirsProj != null)
             {
                 return InProcessExtractor.ExtractCompileCommandsFromDirsProj(
                     options.DirsProj, options.Configuration, options.Platform,
                     options.EnableLogger, options.VcToolsInstallDir,
-                    options.EmitDefaults, options.MergeDefaults);
+                    options.EmitDefaults, options.MergeDefaults, options.FollowProjectReferences);
+            }
+            else if (options.FollowProjectReferences)
+            {
+                var seed = new VcProject(
+                    Path.GetFullPath(options.Projects[0]),
+                    Path.GetFileNameWithoutExtension(options.Projects[0]),
+                    ProjectDiscovery.GetProjectConfigurations(options.Projects[0]));
+                return InProcessExtractor.ExtractCompileCommandsFromProjects(
+                    new List<VcProject> { seed }, options.SolutionDir, options.Configuration, options.Platform,
+                    options.EnableLogger, options.VcToolsInstallDir, options.EmitDefaults, options.MergeDefaults, true);
             }
             else
             {
@@ -374,7 +384,8 @@ namespace MSBuild.CompileCommands.Extractor
                     options.MsBuildPath!, options.Solution, options.Configuration, options.Platform,
                     options.EnableLogger, options.VcToolsInstallDir, options.VcTargetsPath,
                     clPath: options.ClPath,
-                    emitDefaults: options.EmitDefaults, mergeDefaults: options.MergeDefaults);
+                    emitDefaults: options.EmitDefaults, mergeDefaults: options.MergeDefaults,
+                    followProjectReferences: options.FollowProjectReferences);
             }
             else if (options.DirsProjs.Length > 0 && options.DirsProj != null)
             {
@@ -386,7 +397,22 @@ namespace MSBuild.CompileCommands.Extractor
                     msbuildEnv: options.MsBuildEnv,
                     launcher: ParseLauncher(options.MsBuildLauncher),
                     includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
-                    emitDefaults: options.EmitDefaults, mergeDefaults: options.MergeDefaults);
+                    emitDefaults: options.EmitDefaults, mergeDefaults: options.MergeDefaults,
+                    followProjectReferences: options.FollowProjectReferences);
+            }
+            else if (options.FollowProjectReferences)
+            {
+                var seed = new VcProject(
+                    Path.GetFullPath(options.Projects[0]),
+                    Path.GetFileNameWithoutExtension(options.Projects[0]),
+                    ProjectDiscovery.GetProjectConfigurations(options.Projects[0]));
+                return OutOfProcessExtractor.ExtractCompileCommandsFromProjects(
+                    options.MsBuildPath!, new List<VcProject> { seed }, options.SolutionDir,
+                    options.Configuration, options.Platform, options.EnableLogger,
+                    options.VcToolsInstallDir, options.VcTargetsPath, options.ClPath,
+                    options.MsBuildProperties, options.MsBuildEnv,
+                    ParseLauncher(options.MsBuildLauncher), ParseIncludePathOrder(options.IncludePathOrder),
+                    options.EmitDefaults, options.MergeDefaults, true);
             }
             else
             {
@@ -425,12 +451,13 @@ namespace MSBuild.CompileCommands.Extractor
                             launcher: ParseLauncher(options.MsBuildLauncher),
                             includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
                             emitDefaults: options.EmitDefaults,
-                            mergeDefaults: options.MergeDefaults);
+                            mergeDefaults: options.MergeDefaults,
+                            followProjectReferences: options.FollowProjectReferences);
                     else
                         commands = InProcessExtractor.ExtractCompileCommandsFromSolution(
                             sln, options.Configuration, options.Platform,
                             options.EnableLogger, options.VcToolsInstallDir,
-                            options.EmitDefaults, options.MergeDefaults);
+                            options.EmitDefaults, options.MergeDefaults, options.FollowProjectReferences);
                     Console.WriteLine($"  Got {commands.Count} entries");
                     allCommands.AddRange(commands);
                 }
@@ -456,12 +483,13 @@ namespace MSBuild.CompileCommands.Extractor
                             launcher: ParseLauncher(options.MsBuildLauncher),
                             includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
                             emitDefaults: options.EmitDefaults,
-                            mergeDefaults: options.MergeDefaults);
+                            mergeDefaults: options.MergeDefaults,
+                            followProjectReferences: options.FollowProjectReferences);
                     else
                         commands = InProcessExtractor.ExtractCompileCommandsFromDirsProj(
                             dirsProj, options.Configuration, options.Platform,
                             options.EnableLogger, options.VcToolsInstallDir,
-                            options.EmitDefaults, options.MergeDefaults);
+                            options.EmitDefaults, options.MergeDefaults, options.FollowProjectReferences);
                     Console.WriteLine($"  Got {commands.Count} entries");
                     allCommands.AddRange(commands);
                 }
@@ -477,27 +505,27 @@ namespace MSBuild.CompileCommands.Extractor
                 try
                 {
                     List<CompileCommand> commands;
+                    var seed = new VcProject(
+                        Path.GetFullPath(proj),
+                        Path.GetFileNameWithoutExtension(proj),
+                        ProjectDiscovery.GetProjectConfigurations(proj));
+                    var seedList = new List<VcProject> { seed };
                     if (isOutOfProcess)
                     {
-                        var extractor = new OutOfProcessExtractor(
-                            options.MsBuildPath!, proj, options.Configuration, options.Platform,
-                            options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir, options.VcTargetsPath,
-                            options.ClPath,
-                            msbuildProperties: options.MsBuildProperties,
-                            msbuildEnv: options.MsBuildEnv,
-                            launcher: ParseLauncher(options.MsBuildLauncher),
-                            includePathOrder: ParseIncludePathOrder(options.IncludePathOrder),
-                            emitDefaults: options.EmitDefaults,
-                            mergeDefaults: options.MergeDefaults);
-                        commands = extractor.ExtractCompileCommands();
+                        commands = OutOfProcessExtractor.ExtractCompileCommandsFromProjects(
+                            options.MsBuildPath!, seedList, options.SolutionDir,
+                            options.Configuration, options.Platform, options.EnableLogger,
+                            options.VcToolsInstallDir, options.VcTargetsPath, options.ClPath,
+                            options.MsBuildProperties, options.MsBuildEnv,
+                            ParseLauncher(options.MsBuildLauncher), ParseIncludePathOrder(options.IncludePathOrder),
+                            options.EmitDefaults, options.MergeDefaults, options.FollowProjectReferences);
                     }
                     else
                     {
-                        var extractor = new InProcessExtractor(
-                            proj, options.Configuration, options.Platform,
-                            options.EnableLogger, options.SolutionDir, options.VcToolsInstallDir,
-                            options.EmitDefaults, options.MergeDefaults);
-                        commands = extractor.ExtractCompileCommands();
+                        commands = InProcessExtractor.ExtractCompileCommandsFromProjects(
+                            seedList, options.SolutionDir, options.Configuration, options.Platform,
+                            options.EnableLogger, options.VcToolsInstallDir,
+                            options.EmitDefaults, options.MergeDefaults, options.FollowProjectReferences);
                     }
                     Console.WriteLine($"  Got {commands.Count} entries");
                     allCommands.AddRange(commands);
