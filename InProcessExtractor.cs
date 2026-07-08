@@ -19,6 +19,7 @@ namespace MSBuild.CompileCommands.Extractor
         private string[] _externalIncludePaths = [];
         private string[] _includePaths = [];
         private string? _fixupPropsPath;
+        private IReadOnlyDictionary<string, string>? _evaluatedProperties;
 
         // Resolve unevaluated MSBuild expressions like $([MSBuild]::NormalizePath('base', 'rel'))
         // that appear in IncludePath when GetPropertyValue doesn't fully evaluate intrinsics.
@@ -496,12 +497,24 @@ namespace MSBuild.CompileCommands.Extractor
             //    and adds them to ClCompile.AdditionalIncludeDirectories before GetClCommandLines runs.
             //  - ReplaceExistingProjectInstance prevents stale cached ProjectInstances
             //    across --all-configurations iterations.
+            //  - ProvideProjectStateAfterBuild returns the ProjectInstance with the FINAL
+            //    property values, including properties defined dynamically while targets run
+            //    (e.g. GeneratedFilesDir from the C++/WinRT targets). The input projectInstance
+            //    only holds statically-evaluated properties, so residual $(...) references to
+            //    target-defined properties would otherwise stay unexpanded.
             var buildRequestData = new BuildRequestData(
                 projectInstance,
                 new[] { "ComputeReferenceCLInput", "GetProjectDirectories", "GetClCommandLines" },
                 hostServices: null,
-                BuildRequestDataFlags.ReplaceExistingProjectInstance);
+                BuildRequestDataFlags.ReplaceExistingProjectInstance
+                    | BuildRequestDataFlags.ProvideProjectStateAfterBuild);
             var buildResult = BuildManager.DefaultBuildManager.Build(buildParams, buildRequestData);
+
+            // Snapshot the evaluated property values so residual $(...) references that survive
+            // into the captured command lines can be expanded later in ToCompileCommands.
+            // Prefer the post-build project state (has target-defined properties); fall back to
+            // the input instance when the build didn't provide it.
+            _evaluatedProperties = MsBuildPropertyExpander.SnapshotProperties(buildResult.ProjectStateAfterBuild ?? projectInstance);
 
             // Harvest GetProjectDirectories even on failure. It's a light target
             // and often succeeds even when GetClCommandLines doesn't.
@@ -791,19 +804,22 @@ namespace MSBuild.CompileCommands.Extractor
 
             // Build compile commands for each source file
             var commands = new List<CompileCommand>();
-            foreach (var file in sourceFiles)
+            foreach (var rawFile in sourceFiles)
             {
+                // Expand residual $(...) BEFORE rooting.
+                var file = MsBuildPropertyExpander.ExpandMsBuildProperties(rawFile, _evaluatedProperties);
                 var fullPath = Path.IsPathRooted(file)
                     ? file
                     : Path.GetFullPath(Path.Combine(projectDir, file));
 
                 var fileArgs = new List<string>(baseArgs) { fullPath };
-                var commandLine = SanitizeFallbackPaths(fileArgs.ToArray(), _vcToolsInstallDir);
+                var expandedArgs = MsBuildPropertyExpander.ExpandMsBuildProperties(fileArgs.ToArray(), _evaluatedProperties);
+                var commandLine = SanitizeFallbackPaths(expandedArgs, _vcToolsInstallDir);
 
                 commands.Add(new CompileCommand(
                     File: fullPath,
                     Arguments: commandLine,
-                    Directory: projectDir,
+                    Directory: MsBuildPropertyExpander.ExpandMsBuildProperties(projectDir, _evaluatedProperties),
                     ProjectPath: _projectPath,
                     ProjectName: _projectName,
                     Configuration: _configuration,
@@ -984,12 +1000,14 @@ namespace MSBuild.CompileCommands.Extractor
                             // Emit with a synthetic filename so consumers can inspect
                             // the project-wide baseline.
                             var defaultsFile = Path.Combine(entry.WorkingDirectory, "__project_defaults.cpp");
+                            defaultsFile = MsBuildPropertyExpander.ExpandMsBuildProperties(defaultsFile, _evaluatedProperties);
                             var defaultsArgs = new List<string>(baseArgs) { defaultsFile };
-                            var sanitized = SanitizeFallbackPaths(defaultsArgs.ToArray(), _vcToolsInstallDir);
+                            var expandedDefaults = MsBuildPropertyExpander.ExpandMsBuildProperties(defaultsArgs.ToArray(), _evaluatedProperties);
+                            var sanitized = SanitizeFallbackPaths(expandedDefaults, _vcToolsInstallDir);
                             commands.Add(new CompileCommand(
                                 File: defaultsFile,
                                 Arguments: sanitized,
-                                Directory: entry.WorkingDirectory,
+                                Directory: MsBuildPropertyExpander.ExpandMsBuildProperties(entry.WorkingDirectory, _evaluatedProperties),
                                 ProjectPath: _projectPath,
                                 ProjectName: _projectName,
                                 Configuration: _configuration,
@@ -1019,12 +1037,13 @@ namespace MSBuild.CompileCommands.Extractor
                         MergeDefaultFlags(fileArgs, defaultArgs);
 
                     // Resolve any remaining unresolved fallback paths in the arguments
-                    var commandLine = SanitizeFallbackPaths(fileArgs.ToArray(), _vcToolsInstallDir);
+                    var expandedFileArgs = MsBuildPropertyExpander.ExpandMsBuildProperties(fileArgs.ToArray(), _evaluatedProperties);
+                    var commandLine = SanitizeFallbackPaths(expandedFileArgs, _vcToolsInstallDir);
 
                     commands.Add(new CompileCommand(
-                        File: file,
+                        File: MsBuildPropertyExpander.ExpandMsBuildProperties(file, _evaluatedProperties),
                         Arguments: commandLine,
-                        Directory: entry.WorkingDirectory,
+                        Directory: MsBuildPropertyExpander.ExpandMsBuildProperties(entry.WorkingDirectory, _evaluatedProperties),
                         ProjectPath: _projectPath,
                         ProjectName: _projectName,
                         Configuration: _configuration,
