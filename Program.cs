@@ -9,6 +9,9 @@ namespace MSBuild.CompileCommands.Extractor
         {
             var options = CommandLineOptions.Parse(args);
 
+            if (options.ConfigPath != null && !options.ListInstances)
+                Console.WriteLine($"Using config file: {options.ConfigPath}");
+
             // Handle --list-instances: print all VS installations and exit
             if (options.ListInstances)
             {
