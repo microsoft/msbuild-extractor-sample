@@ -289,6 +289,9 @@ namespace MSBuild.CompileCommands.Extractor
 
                 if (projects.Length == 0 && solutions.Length == 0 && !hasConfigInputs)
                     commandResult.AddError("At least one --project or --solution must be specified (via the command line or a config file).");
+
+                if (commandResult.GetValue(cCppPropertiesOption) && commandResult.GetValue(formatOption) == "rich")
+                    commandResult.AddError("--c-cpp-properties cannot be used with --format rich (rich format does not produce compile_commands.json).");
             });
 
             rootCommand.SetAction(parseResult =>
