@@ -1,0 +1,42 @@
+{
+  "projects": [
+    "src/app/app.vcxproj",
+    "src/lib/lib.vcxproj"
+  ],
+  "solutions": [
+    "MySolution.slnx"
+  ],
+  "configuration": "Debug",
+  "platform": "x64",
+  "allConfigurations": false,
+  "merge": false,
+  "output": null,
+  "format": "standard",
+  "emitCCppProperties": false,
+  "deduplicate": false,
+  "preferConfiguration": "Debug",
+  "preferPlatform": "x64",
+  "emitDefaults": false,
+  "mergeDefaults": false,
+  "validate": false,
+  "strict": false,
+  "logger": false,
+  "useDevEnv": false,
+  "vsInstance": null,
+  "vsPath": null,
+  "msBuildPath": null,
+  "vcTargetsPath": null,
+  "clPath": null,
+  "vcToolsInstallDir": null,
+  "solutionDir": null,
+  "msBuildLauncher": "auto",
+  "includePathOrder": "auto",
+  "msBuildProperties": {
+    "BuildProjectReferences": "true",
+    "UseMultiToolTask": "false"
+  },
+  "msBuildEnv": {
+    "CL": "/DDEBUG",
+    "TMP": "C:\\Temp"
+  }
+}

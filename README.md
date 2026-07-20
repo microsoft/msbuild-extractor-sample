@@ -148,9 +148,66 @@ Options:
   --use-dev-env                     Read Developer Command Prompt environment variables
   --c-cpp-properties                Emit .vscode/c_cpp_properties.json alongside the output
   --logger                          Enable MSBuild console logger output
+  --config <path>                   JSON config file supplying option defaults (see below)
 ```
 
-At least one `--project` or `--solution` must be specified. Both can be repeated and combined.
+At least one `--project` or `--solution` must be specified (on the command line **or** in a config file). Both can be repeated and combined.
+
+## Configuration file
+
+Options can be supplied from a JSON config file so the tool can run with no arguments:
+
+```bash
+# Uses ./msbuild-extractor.json automatically if it exists
+msbuild-extractor-sample
+
+# Or point at a config file explicitly
+msbuild-extractor-sample --config path/to/config.json
+```
+
+- **Auto-detection:** when `--config` is not passed, a `msbuild-extractor.json` in the current directory is loaded automatically if present.
+- **Precedence:** command-line options override the config file, which overrides the built-in defaults.
+- **Inputs required:** at least one `projects` or `solutions` entry must come from the config file or the command line.
+- **Relative paths** in the config file are resolved from the config file's own directory.
+- The loader is lenient: keys match case-insensitively, and `//` comments and trailing commas are allowed.
+
+See [`msbuild-extractor.example.json`](msbuild-extractor.example.json) for a ready-to-copy example that lists every supported key set to its default. Copy it to `msbuild-extractor.json` to get started.
+
+### Config keys
+
+At least one `projects` or `solutions` entry is required. All other keys are optional; an omitted key keeps its default.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `projects` | string[] | `[]` | Paths to `.vcxproj` files (equivalent to repeated `--project`). |
+| `solutions` | string[] | `[]` | Paths to `.sln` / `.slnx` files (equivalent to repeated `--solution`). |
+| `configuration` | string | `"Debug"` | Build configuration. |
+| `platform` | string | `"x64"` | Build platform. |
+| `allConfigurations` | bool | `false` | Extract every configuration/platform combination. |
+| `merge` | bool | `false` | With `allConfigurations`, merge into a single output file. |
+| `output` | string | `null` | Output path (defaults to `compile_commands.json`). |
+| `format` | string | `"standard"` | Output format: `"standard"` or `"rich"`. |
+| `emitCCppProperties` | bool | `false` | Also emit `.vscode/c_cpp_properties.json` (not allowed with `"rich"`). |
+| `deduplicate` | bool | `false` | Merge duplicate entries per file for IntelliSense. |
+| `preferConfiguration` | string | `"Debug"` | Preferred configuration for dedup conflicts. |
+| `preferPlatform` | string | `"x64"` | Preferred platform for dedup conflicts. |
+| `emitDefaults` | bool | `false` | Include the synthetic `__project_defaults.cpp` entry. |
+| `mergeDefaults` | bool | `false` | Merge project-wide default switches into each per-file entry. |
+| `validate` | bool | `false` | Verify each entry by running `cl.exe /c`. |
+| `strict` | bool | `false` | Treat configuration/platform warnings as errors. |
+| `logger` | bool | `false` | Enable MSBuild console logger output. |
+| `useDevEnv` | bool | `false` | Read environment from a Developer Command Prompt. |
+| `vsInstance` | string | `null` | Select the VS installation by instance ID. |
+| `vsPath` | string | `null` | Path to a Visual Studio installation (auto-detected). |
+| `msBuildPath` | string | `null` | Path to `msbuild.exe` (enables out-of-process mode). |
+| `vcTargetsPath` | string | `null` | VC targets directory (auto-detected). |
+| `clPath` | string | `null` | Path to `cl.exe` (auto-resolved). |
+| `vcToolsInstallDir` | string | `null` | `VCToolsInstallDir` MSBuild property (auto-detected). |
+| `solutionDir` | string | `null` | `SolutionDir` MSBuild property (auto-derived with `solutions`). |
+| `msBuildLauncher` | string | `"auto"` | How to launch MSBuild: `"auto"`, `"cmd"`, `"direct"`, or `"dotnet"`. |
+| `includePathOrder` | string | `"auto"` | Include-path placement: `"auto"`, `"prepend"`, or `"append"`. |
+| `msBuildProperties` | object | `{}` | MSBuild global properties as `KEY: VALUE` (merged with `--msbuild-property`). |
+| `msBuildEnv` | object | `{}` | Environment variables for the MSBuild process as `KEY: VALUE` (merged with `--msbuild-env`). |
 
 The output includes a sentinel entry (`.msbuild-extractor-sample`) as the first element so consumers can identify the generator. Standard C++ LSP tools silently skip it since the file does not exist on disk.
 
