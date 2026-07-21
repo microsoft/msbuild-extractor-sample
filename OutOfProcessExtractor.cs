@@ -80,6 +80,7 @@ namespace MSBuild.CompileCommands.Extractor
 
         private string[] _externalIncludePaths = [];
         private string[] _includePaths = [];
+        private IReadOnlyDictionary<string, string>? _evaluatedProperties;
 
         private static readonly char[] CmdMetaChars =
             { ' ', '\t', ';', '&', '|', '^', '<', '>', '(', ')' };
@@ -508,6 +509,16 @@ namespace MSBuild.CompileCommands.Extractor
             var build = BinaryLog.ReadBuild(binlogPath);
             var target = build.FindFirstDescendant<Target>(t => t.Name == "GetClCommandLines");
 
+            // Snapshot evaluated property values (last-wins) so residual $(...) references that
+            // survive into the captured command lines can be expanded in ToCompileCommands.
+            var propertyMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in build.FindChildrenRecursive<Property>())
+            {
+                if (!string.IsNullOrEmpty(prop.Name) && !string.IsNullOrEmpty(prop.Value))
+                    propertyMap[prop.Name] = prop.Value;
+            }
+            _evaluatedProperties = propertyMap;
+
             // Prefer GetProjectDirectories target output over raw property reads,
             // it accounts for UseEnv=true and Makefile configuration resolution that
             // raw property values miss.
@@ -769,12 +780,14 @@ namespace MSBuild.CompileCommands.Extractor
                         if (_emitDefaults)
                         {
                             var defaultsFile = Path.Combine(entry.WorkingDirectory, "__project_defaults.cpp");
+                            defaultsFile = MsBuildPropertyExpander.ExpandMsBuildProperties(defaultsFile, _evaluatedProperties);
                             var defaultsArgs = new List<string>(baseArgs) { defaultsFile };
-                            var sanitized = InProcessExtractor.SanitizeFallbackPaths(defaultsArgs.ToArray(), _vcToolsInstallDir);
+                            var expandedDefaults = MsBuildPropertyExpander.ExpandMsBuildProperties(defaultsArgs.ToArray(), _evaluatedProperties);
+                            var sanitized = InProcessExtractor.SanitizeFallbackPaths(expandedDefaults, _vcToolsInstallDir);
                             commands.Add(new CompileCommand(
                                 File: defaultsFile,
                                 Arguments: sanitized,
-                                Directory: entry.WorkingDirectory,
+                                Directory: MsBuildPropertyExpander.ExpandMsBuildProperties(entry.WorkingDirectory, _evaluatedProperties),
                                 ProjectPath: _projectPath,
                                 ProjectName: projectName,
                                 Configuration: _configuration,
@@ -791,12 +804,13 @@ namespace MSBuild.CompileCommands.Extractor
                     if (_mergeDefaults && defaultArgs != null)
                         InProcessExtractor.MergeDefaultFlags(fileArgs, defaultArgs);
 
-                    var commandLine = InProcessExtractor.SanitizeFallbackPaths(fileArgs.ToArray(), _vcToolsInstallDir);
+                    var expandedFileArgs = MsBuildPropertyExpander.ExpandMsBuildProperties(fileArgs.ToArray(), _evaluatedProperties);
+                    var commandLine = InProcessExtractor.SanitizeFallbackPaths(expandedFileArgs, _vcToolsInstallDir);
 
                     commands.Add(new CompileCommand(
-                        File: file,
+                        File: MsBuildPropertyExpander.ExpandMsBuildProperties(file, _evaluatedProperties),
                         Arguments: commandLine,
-                        Directory: entry.WorkingDirectory,
+                        Directory: MsBuildPropertyExpander.ExpandMsBuildProperties(entry.WorkingDirectory, _evaluatedProperties),
                         ProjectPath: _projectPath,
                         ProjectName: projectName,
                         Configuration: _configuration,
@@ -1093,19 +1107,22 @@ namespace MSBuild.CompileCommands.Extractor
                 a.StartsWith("/errorReport", StringComparison.OrdinalIgnoreCase));
 
             var commands = new List<CompileCommand>();
-            foreach (var file in sourceFiles)
+            foreach (var rawFile in sourceFiles)
             {
+                // Expand residual $(...) BEFORE rooting.
+                var file = MsBuildPropertyExpander.ExpandMsBuildProperties(rawFile, _evaluatedProperties);
                 var fullPath = Path.IsPathRooted(file)
                     ? file
                     : Path.GetFullPath(Path.Combine(projectDir, file));
 
                 var fileArgs = new List<string>(baseArgs) { fullPath };
-                var commandLine = InProcessExtractor.SanitizeFallbackPaths(fileArgs.ToArray(), _vcToolsInstallDir);
+                var expandedArgs = MsBuildPropertyExpander.ExpandMsBuildProperties(fileArgs.ToArray(), _evaluatedProperties);
+                var commandLine = InProcessExtractor.SanitizeFallbackPaths(expandedArgs, _vcToolsInstallDir);
 
                 commands.Add(new CompileCommand(
                     File: fullPath,
                     Arguments: commandLine,
-                    Directory: projectDir,
+                    Directory: MsBuildPropertyExpander.ExpandMsBuildProperties(projectDir, _evaluatedProperties),
                     ProjectPath: _projectPath,
                     ProjectName: projectName,
                     Configuration: _configuration,
